@@ -22,6 +22,9 @@
 #include <fstream>
 #include <shellapi.h>
 
+struct Pass;
+Pass* g_editedPass = nullptr;
+
 using std::vector;
 using std::shared_ptr;
 using std::make_shared;
@@ -913,10 +916,14 @@ static void windowErrorCallback(int error, const char* description)
 	fprintf(stderr, "Error %d: %s\n", error, description);
 }
 
+std::vector<std::string> editorFileDrops;
+
 static void windowDropCallback(GLFWwindow* window, int count, const char** files)
 {
-	while (count--) {
-		g_project.handleFileDrop(*files++);
+	if (nullptr == g_editedPass) {
+		while (count--) {
+			editorFileDrops.push_back(*files++);
+		}
 	}
 }
 
@@ -1206,7 +1213,32 @@ struct ShaderNodeBackend : INodeGraphBackend
 		return &ni;
 	}
 
-	void getGlobalContextMenuItems(std::vector<std::string> *const items) override
+	void onContextMenu(const NodeInfo* node) override
+	{
+		if (node)
+		{
+			ImGui::Text("Node '%s'", node->name.data);
+			ImGui::Separator();
+			if (ImGui::MenuItem("Rename..", NULL, false, false)) {}
+			if (ImGui::MenuItem("Delete", NULL, false, false)) {}
+			if (ImGui::MenuItem("Copy", NULL, false, false)) {}
+		}
+		else
+		{
+			//if (ImGui::MenuItem("Add")) { nodes.push_back(Node(nodes.Size, "New node", scene_pos, 0.5f, ImColor(100,100,200), 2, 2)); }
+			//if (ImGui::MenuItem("Paste", NULL, false, false)) {}
+			std::vector<std::string> items;
+			getGlobalContextMenuItems(&items);
+
+			for (std::string& it : items) {
+				if (ImGui::MenuItem(it.c_str(), NULL, false, true)) {
+					onGlobalContextMenuSelected(it);
+				}
+			}
+		}
+	}
+
+	void getGlobalContextMenuItems(std::vector<std::string> *const items)
 	{
 		std::vector<fs::path> files;
 		getFilesMatchingExtension("data", ".glsl", files);
@@ -1217,7 +1249,7 @@ struct ShaderNodeBackend : INodeGraphBackend
 		}
 	}
 
-	void onGlobalContextMenuSelected(const std::string& shaderFile) override
+	void onGlobalContextMenuSelected(const std::string& shaderFile)
 	{
 		g_project.handleFileDrop("data/" + shaderFile + ".glsl");
 	}
@@ -1342,8 +1374,6 @@ int CALLBACK WinMain(
 	bool maximized = false;
 	float f;
 
-	Pass* editedPass = nullptr;
-
 	// Main loop
 	while (!glfwWindowShouldClose(window)) {
 		glfwPollEvents();
@@ -1364,8 +1394,8 @@ int CALLBACK WinMain(
 				}
 
 				if (e.keyboard.key == GLFW_KEY_ESCAPE && e.keyboard.action == GLFW_PRESS) {
-					if (editedPass) {
-						editedPass = nullptr;
+					if (g_editedPass) {
+						g_editedPass = nullptr;
 					}
 				}
 			}
@@ -1394,10 +1424,10 @@ int CALLBACK WinMain(
 			bool windowOpen = true;
 			ImGui::Begin("Another Window", &windowOpen, windowFlags);
 
-			if (editedPass) {
+			if (g_editedPass) {
 				bool windowOpen = true;
 				ImGui::Begin("Another Window", &windowOpen, windowFlags);
-				doPassUi(*editedPass);
+				doPassUi(*g_editedPass);
 				ImGui::End();
 			} else if (g_project.m_packages.size() > 0) {
 				static ShaderNodeBackend nodeBackend;
@@ -1405,7 +1435,7 @@ int CALLBACK WinMain(
 				nodeBackend.shaderPackage = g_project.m_packages[0];
 				nodeGraph(&nodeBackend);
 				if (nodeBackend.triggeredNode != nullptr) {
-					editedPass = ShaderNodeBackend::getPass(nodeBackend.triggeredNode);
+					g_editedPass = ShaderNodeBackend::getPass(nodeBackend.triggeredNode);
 				}
 			}
 
@@ -1471,6 +1501,17 @@ int CALLBACK WinMain(
 				glfwSetWindowMonitor(window, nullptr, lastX, lastY, lastWidth, lastHeight, GLFW_DONT_CARE);
 				glfwSwapInterval(1);
 			}
+		}
+
+		if (!editorFileDrops.empty()) {
+			glfwFocusWindow(window);
+		}
+
+		if (ImGui::GetMousePos().x > -9000) {
+			for (auto& file : editorFileDrops) {
+				g_project.handleFileDrop(file);
+			}
+			editorFileDrops.clear();
 		}
 	}
 

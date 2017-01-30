@@ -1,6 +1,8 @@
 // ImGui - standalone example application for Glfw + OpenGL 3, using programmable pipeline
 
 #include "NodeGraph.h"
+#include "FreeList.h"
+
 #include <imgui.h>
 #include <stdio.h>
 #include <math.h>
@@ -13,6 +15,15 @@
 // Here we only declare simple +/- operators so others don't leak into the demo code.
 static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x+rhs.x, lhs.y+rhs.y); }
 static inline ImVec2 operator-(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x-rhs.x, lhs.y-rhs.y); }
+
+static float length(const ImVec2& c) {
+	return sqrtf(c.x * c.x + c.y * c.y);
+}
+
+static float distance(const ImVec2& a, const ImVec2& b) {
+	return length(a - b);
+}
+
 
 FixedString& FixedString::operator=(const char* const n) {
 	strncpy(data, n, sizeof(data) - 1);
@@ -27,37 +38,16 @@ FixedString& FixedString::operator=(const std::string& n) {
 	return *this;
 }
 
-void drawHermite(ImDrawList* drawList, ImVec2 p1, ImVec2 p2, int STEPS)
-{
-	ImVec2 t1 = ImVec2(+80.0f, 0.0f);
-	ImVec2 t2 = ImVec2(+80.0f, 0.0f);
-
-	for (int step = 0; step <= STEPS; step++)
-	{
-		float t = (float)step / (float)STEPS;
-		float h1 = +2 * t*t*t - 3 * t*t + 1.0f;
-		float h2 = -2 * t*t*t + 3 * t*t;
-		float h3 = t*t*t - 2 * t*t + t;
-		float h4 = t*t*t - t*t;
-		drawList->PathLineTo(ImVec2(h1*p1.x + h2*p2.x + h3*t1.x + h4*t2.x, h1*p1.y + h2*p2.y + h3*t1.y + h4*t2.y));
-	}
-
-	drawList->PathStroke(ImColor(200, 200, 100), false, 3.0f);
-}
-
-
-static size_t uid(const NodeInfo* ni) {
-	return reinterpret_cast<size_t>(ni);
-}
-
 struct Connector {
 	NodeInfo* node;
 	size_t port;
+	bool isOutput;
 
 	static Connector invalid() {
 		Connector res;
 		res.node = nullptr;
 		res.port = 0;
+		res.isOutput = false;
 		return res;
 	}
 
@@ -66,7 +56,7 @@ struct Connector {
 	}
 
 	bool operator==(const Connector& o) const {
-		return node == o.node && port == o.port;
+		return node == o.node && port == o.port && isOutput == o.isOutput;
 	}
 	bool operator!=(const Connector& o) const {
 		return !(*this == o);
@@ -79,13 +69,9 @@ struct DragNode
 	Connector con;
 };
 
-enum DragState
-{
+enum DragState {
 	DragState_Default,
-	DragState_Hover,
-	DragState_BeginDrag,
-	DragState_Draging,
-	DragState_Connect,
+	DragState_Dragging,
 };
 
 static DragNode s_dragNode;
@@ -98,49 +84,33 @@ struct NodeImpl
 	std::vector<ImVec2> outputSlotPos;
 };
 
-/*struct NodeLink
+void drawNodeLink(ImDrawList *const drawList, const ImVec2& fromPort, const ImVec2& toPort)
 {
-	NodeInfo* srcNode;
-	NodeInfo* dstNode;
-	size_t srcPort;
-	size_t dstPort;
-};*/
+	ImVec2 connectionVector = toPort - fromPort;
+	const float curvature = length(ImVec2(connectionVector.x * 0.5f, connectionVector.y * 0.25f));
+	drawList->AddBezierCurve(
+		fromPort,
+		fromPort + ImVec2(curvature, 0),
+		toPort + ImVec2(-curvature, 0),
+		toPort,
+		ImColor(200, 200, 100), 3.0f);
+}
 
 struct NodeGraphState
 {
 	std::vector<NodeInfo*> nodes;
-	std::list<NodeImpl> nodeImpls;	// TODO: change to a flat vector with gc
 	std::vector<LinkInfo> links;
 
 	ImVec2 scrolling = ImVec2(0.0f, 0.0f);
-	int node_selected = -1;
+	ImVec2 originOffset = ImVec2(0.0f, 0.0f);
+	NodeInfo* nodeSelected = nullptr;
 
-	bool open_context_menu = false;
-	int node_hovered_in_scene = -1;
-
-
-	/*static bool isConnectorHovered(NodeLink* c, ImVec2 offset)
-	{
-		ImVec2 mousePos = ImGui::GetIO().MousePos;
-		ImVec2 conPos = offset + c->pos;
-
-		float xd = mousePos.x - conPos.x;
-		float yd = mousePos.y - conPos.y;
-
-		return ((xd * xd) + (yd *yd)) < (NODE_SLOT_RADIUS * NODE_SLOT_RADIUS);
-	}*/
-
-	///////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
-
-	static float dist(const ImVec2& a, const ImVec2& b) {
-		ImVec2 c = a - b;
-		return sqrtf(c.x * c.x + c.y * c.y);
-	}
+	bool openContextMenu = false;
+	NodeInfo* nodeHoveredInScene = nullptr;
 
 	Connector getHoverCon(ImVec2 offset, ImVec2* pos)
 	{
 		const ImVec2 mousePos = ImGui::GetIO().MousePos;
-		//printf("mousePos: %f %f\n", mousePos.x, mousePos.y);
 
 		for (NodeInfo* node : nodes)
 		{
@@ -150,7 +120,7 @@ struct NodeGraphState
 
 				for (size_t i = 0; i < node->inputs.size(); ++i)
 				{
-					const float d = dist(node->impl->inputSlotPos[i], mousePos);
+					const float d = distance(node->impl->inputSlotPos[i], mousePos);
 					if (d < closestDist) {
 						closestDist = d;
 						closest = i;
@@ -159,7 +129,7 @@ struct NodeGraphState
 
 				if (closestDist < 8.0f) {
 					*pos = node->impl->inputSlotPos[closest];
-					return Connector{ node, closest };
+					return Connector{ node, closest, false };
 				}
 			}
 
@@ -170,7 +140,7 @@ struct NodeGraphState
 				for (size_t i = 0; i < node->outputs.size(); ++i)
 				{
 					//printf("o: %f %f\n", node->impl->outputSlotPos[i].x, node->impl->outputSlotPos[i].y);
-					const float d = dist(node->impl->outputSlotPos[i], mousePos);
+					const float d = distance(node->impl->outputSlotPos[i], mousePos);
 					if (d < closestDist) {
 						closestDist = d;
 						closest = i;
@@ -179,7 +149,7 @@ struct NodeGraphState
 
 				if (closestDist < 8.0f) {
 					*pos = node->impl->outputSlotPos[closest];
-					return Connector{ node, closest };
+					return Connector{ node, closest, true };
 				}
 			}
 		}
@@ -195,47 +165,26 @@ struct NodeGraphState
 		{
 			ImVec2 pos;
 			if (Connector con = getHoverCon(offset, &pos)) {
-				s_dragNode.con = con;
-				s_dragNode.pos = pos;
-				s_dragState = DragState_Hover;
-				return;
+				if (ImGui::IsMouseClicked(0)) {
+					s_dragNode.con = con;
+					s_dragNode.pos = pos;
+					s_dragState = DragState_Dragging;
+				}
 			}
-
 			break;
 		}
 
-		case DragState_Hover:
-		{
-			ImVec2 pos;
-			Connector con = getHoverCon(offset, &pos);
-
-			// Make sure we are still hovering the same node
-
-			if (con != s_dragNode.con)
-			{
-				s_dragNode.con = Connector::invalid();
-				s_dragState = DragState_Default;
-				return;
-			}
-
-			if (ImGui::IsMouseClicked(0) && s_dragNode.con)
-				s_dragState = DragState_Draging;
-
-			break;
-		}
-
-		case DragState_BeginDrag:
-		{
-			break;
-		}
-
-		case DragState_Draging:
+		case DragState_Dragging:
 		{
 			ImDrawList* drawList = ImGui::GetWindowDrawList();
 
 			drawList->ChannelsSetCurrent(1);
 
-			drawHermite(drawList, s_dragNode.pos, ImGui::GetIO().MousePos, 12);
+			if (s_dragNode.con.isOutput) {
+				drawNodeLink(drawList, s_dragNode.pos, ImGui::GetIO().MousePos);
+			} else {
+				drawNodeLink(drawList, ImGui::GetIO().MousePos, s_dragNode.pos);
+			}
 
 			if (!ImGui::IsMouseDown(0))
 			{
@@ -252,52 +201,49 @@ struct NodeGraphState
 				}
 
 				// Lets connect the nodes.
-				// TODO: Make sure we connect stuff in the correct way!
-
 				LinkInfo li = { s_dragNode.con.node, con.node, s_dragNode.con.port, con.port };
 				if (backend->onConnected(li))
 				{
 					links.push_back(li);
 				}
 
-				// TODO
-				//con->input = s_dragNode.con;
-
 				s_dragNode.con = Connector::invalid();
 				s_dragState = DragState_Default;
 			}
-
-			break;
-		}
-
-		case DragState_Connect:
-		{
 			break;
 		}
 		}
 	}
 
+	FreeList<NodeImpl>& nodeImplPool() {
+		FreeList<NodeImpl> inst;
+		return inst;
+	}
+
 	void updateNodes(INodeGraphBackend *const backend)
 	{
+		static FreeList<NodeImpl> nodeImplPool;
+		bool selectedNodeFound = false;
+
 		nodes.clear();
 		nodes.resize(backend->getNodeCount());
 		for (size_t i = 0; i < nodes.size(); ++i) {
 			nodes[i] = backend->getNodeByIdx(i);
 			if (!nodes[i]->impl) {
-				nodeImpls.push_back(NodeImpl());
-				nodes[i]->impl = &nodeImpls.back();
-				ImVec2 mousePos = ImGui::GetIO().MousePos;
-				if (mousePos.x > -9000) {
-					nodes[i]->impl->Pos = mousePos;
-				} else {
-					nodes[i]->impl->Pos = ImVec2(i % 5 * 200 + 20, 200);
+				const ImVec2 mousePos = ImGui::GetIO().MousePos + scrolling - this->originOffset;
+
+				nodes[i]->impl = nodeImplPool.alloc();
+				nodes[i]->impl->Pos = mousePos;
+			} else {
+				if (nodes[i] == nodeSelected) {
+					selectedNodeFound = true;
 				}
 			}
 		}
 
-		// HACK
-		//links.clear();
-		//links.push_back({ nodes[0], nodes[1], 2, 0 });
+		if (!selectedNodeFound) {
+			nodeSelected = false;
+		}
 	}
 
 	void drawGrid(ImDrawList* const draw_list, const ImVec2& offset)
@@ -321,7 +267,7 @@ struct NodeGraphState
 		for (int node_idx = 0; node_idx < nodes.size(); node_idx++)
 		{
 			NodeInfo* node = nodes[node_idx];
-			ImGui::PushID(uid(node));
+			ImGui::PushID(node);
 			ImVec2 node_rect_min = offset + node->impl->Pos;
 
 			// Display node contents first
@@ -388,8 +334,8 @@ struct NodeGraphState
 			ImGui::InvisibleButton("node", node->impl->Size);
 			if (ImGui::IsItemHovered())
 			{
-				node_hovered_in_scene = uid(node);
-				open_context_menu |= ImGui::IsMouseClicked(1);
+				nodeHoveredInScene = node;
+				openContextMenu |= ImGui::IsMouseClicked(1);
 
 				if (ImGui::IsMouseDoubleClicked(0)) {
 					backend->onTriggered(node);
@@ -397,11 +343,11 @@ struct NodeGraphState
 			}
 			bool node_moving_active = ImGui::IsItemActive();
 			if (node_widgets_active || node_moving_active)
-				node_selected = uid(node);
+				nodeSelected = node;
 			if (node_moving_active && ImGui::IsMouseDragging(0) && s_dragState == DragState_Default)
 				node->impl->Pos = node->impl->Pos + ImGui::GetIO().MouseDelta;
 
-			ImU32 node_bg_color = (node_hovered_in_scene == uid(node) || node_selected == uid(node)) ? ImColor(75, 75, 75) : ImColor(60, 60, 60);
+			ImU32 node_bg_color = (nodeHoveredInScene == node || nodeSelected == node) ? ImColor(75, 75, 75) : ImColor(60, 60, 60);
 			draw_list->AddRectFilled(node_rect_min, node_rect_max, node_bg_color, 8.0f);
 			draw_list->AddRectFilled(node_rect_min, ImVec2(node_rect_max.x, nodeHeaderMaxY - 6), ImColor(255, 255, 255, 32), 8.0f, 1 | 2);
 
@@ -430,18 +376,18 @@ struct NodeGraphState
 		for (int link_idx = 0; link_idx < links.size(); link_idx++)
 		{
 			LinkInfo* link = &links[link_idx];
-			NodeImpl* node_inp = link->srcNode->impl;
-			NodeImpl* node_out = link->dstNode->impl;
-			ImVec2 p1 = node_inp->outputSlotPos[link->srcPort];
-			ImVec2 p2 = node_out->inputSlotPos[link->dstPort];
-			draw_list->AddBezierCurve(p1, p1 + ImVec2(+50, 0), p2 + ImVec2(-50, 0), p2, ImColor(200, 200, 100), 3.0f);
+			NodeImpl* srcNode = link->srcNode->impl;
+			NodeImpl* dstNode = link->dstNode->impl;
+			ImVec2 p1 = srcNode->outputSlotPos[link->srcPort];
+			ImVec2 p2 = dstNode->inputSlotPos[link->dstPort];
+			drawNodeLink(draw_list, p1, p2);
 		}
 	}
 
 	void doGui(INodeGraphBackend *const backend)
 	{
-		open_context_menu = false;
-		node_hovered_in_scene = -1;
+		openContextMenu = false;
+		nodeHoveredInScene = nullptr;
 
 		updateNodes(backend);
 
@@ -458,7 +404,8 @@ struct NodeGraphState
 		ImGui::BeginChild("scrolling_region", ImVec2(0, 0), scollingRegionBorder, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);*/
 		ImGui::PushItemWidth(120.0f);
 
-		ImVec2 offset = ImGui::GetCursorScreenPos() - scrolling;
+		this->originOffset = ImGui::GetCursorScreenPos();
+		ImVec2 offset = this->originOffset - scrolling;
 		ImDrawList* draw_list = ImGui::GetWindowDrawList();
 
 		draw_list->ChannelsSplit(3);
@@ -473,43 +420,21 @@ struct NodeGraphState
 		// Open context menu
 		if (!ImGui::IsAnyItemHovered() && ImGui::IsMouseHoveringWindow() && ImGui::IsMouseClicked(1))
 		{
-			node_selected = node_hovered_in_scene = -1;
-			open_context_menu = true;
+			nodeSelected = nodeHoveredInScene = nullptr;
+			openContextMenu = true;
 		}
-		if (open_context_menu)
+		if (openContextMenu)
 		{
 			ImGui::OpenPopup("context_menu");
-			if (node_hovered_in_scene != -1)
-				node_selected = node_hovered_in_scene;
+			if (nodeHoveredInScene != nullptr)
+				nodeSelected = nodeHoveredInScene;
 		}
 
 		// Draw context menu
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
 		if (ImGui::BeginPopup("context_menu"))
 		{
-			NodeInfo* node = node_selected != -1 ? nodes[node_selected] : NULL;
-			ImVec2 scene_pos = ImGui::GetMousePosOnOpeningCurrentPopup() - offset;
-			if (node)
-			{
-				ImGui::Text("Node '%s'", uid(node));
-				ImGui::Separator();
-				if (ImGui::MenuItem("Rename..", NULL, false, false)) {}
-				if (ImGui::MenuItem("Delete", NULL, false, false)) {}
-				if (ImGui::MenuItem("Copy", NULL, false, false)) {}
-			}
-			else
-			{
-				//if (ImGui::MenuItem("Add")) { nodes.push_back(Node(nodes.Size, "New node", scene_pos, 0.5f, ImColor(100,100,200), 2, 2)); }
-				//if (ImGui::MenuItem("Paste", NULL, false, false)) {}
-				std::vector<std::string> items;
-				backend->getGlobalContextMenuItems(&items);
-
-				for (std::string& it : items) {
-					if (ImGui::MenuItem(it.c_str(), NULL, false, true)) {
-						backend->onGlobalContextMenuSelected(it);
-					}					
-				}
-			}
+			backend->onContextMenu(nodeSelected);
 			ImGui::EndPopup();
 		}
 		ImGui::PopStyleVar();
