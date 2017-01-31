@@ -45,6 +45,7 @@ struct INodeGraphBackend
 	virtual bool onConnected(const LinkInfo&) = 0;
 	virtual void onDisconnected(const LinkInfo&) = 0;
 	virtual void onTriggered(const NodeInfo*) = 0;
+	virtual void onDeleted(const NodeInfo*) = 0;
 	virtual void onContextMenu(const NodeInfo*) = 0;
 };
 

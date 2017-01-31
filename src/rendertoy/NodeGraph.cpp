@@ -144,12 +144,10 @@ void drawNodeLink(ImDrawList *const drawList, const BezierCurve& c, ImColor col 
 
 struct LinkState : LinkInfo {
 	BezierCurve curve;
-	bool mark : 1;
 	bool requestDelete : 1;
 
 	LinkState()
-		: mark(false)
-		, requestDelete(false)
+		: requestDelete(false)
 	{}
 };
 
@@ -530,6 +528,20 @@ struct NodeGraphState
 			ImGui::OpenPopup("context_menu");
 			if (nodeHoveredInScene != nullptr)
 				nodeSelected = nodeHoveredInScene;
+		}
+
+		const ImGuiIO& io = ImGui::GetIO();
+		if (nodeSelected && ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
+			for (auto& l : links) {
+				if (l.dstNode == nodeSelected || l.srcNode == nodeSelected) {
+					l.requestDelete = true;
+				}
+			}
+
+			NodeImpl* impl = nodeSelected->impl;
+			backend->onDeleted(nodeSelected);
+			nodeSelected = nullptr;
+			nodeImplPool().free(impl);
 		}
 
 		// Draw context menu

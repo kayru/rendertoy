@@ -32,7 +32,7 @@ struct FreeList
 
 	void free(T* it) {
 		FreeItem* item = reinterpret_cast<FreeItem*>(it);
-		item->nextFree = nextFree;
+		item->next = nextFree;
 		nextFree = item;
 	}
 

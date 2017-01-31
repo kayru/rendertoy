@@ -682,6 +682,10 @@ struct Package
 {
 	vector<shared_ptr<Pass>> m_passes;
 
+	void deletePass(Pass* p) {
+		m_passes.erase(std::remove_if(m_passes.begin(), m_passes.end(), [p](const auto& other){ return other.get() == p; }), m_passes.end());
+	}
+
 	void handleFileDrop(const std::string& path)
 	{
 		if (ends_with(path, ".glsl")) {
@@ -1279,6 +1283,14 @@ struct ShaderNodeBackend : INodeGraphBackend
 
 	void onTriggered(const NodeInfo* node) override {
 		triggeredNode = node;
+	}
+
+	void onDeleted(const NodeInfo* node) override {
+		// HACK
+		Pass* pass = getPass(node);
+		for (auto& pkg : g_project.m_packages) {
+			pkg->deletePass(pass);
+		}		
 	}
 };
 
