@@ -12,18 +12,39 @@
 #include <stdint.h>
 
 // NB: You can use math functions/operators on ImVec2 if you #define IMGUI_DEFINE_MATH_OPERATORS and #include "imgui_internal.h"
-// Here we only declare simple +/- operators so others don't leak into the demo code.
 static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x+rhs.x, lhs.y+rhs.y); }
 static inline ImVec2 operator-(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x-rhs.x, lhs.y-rhs.y); }
+static inline ImVec2 operator*(const ImVec2& lhs, const float rhs) { return ImVec2(lhs.x*rhs, lhs.y*rhs); }
+
+static float dot(const ImVec2& a, const ImVec2& b) {
+	return a.x * b.x + a.y * b.y;
+}
+
+static float lengthSquared(const ImVec2& c) {
+	return dot(c, c);
+}
 
 static float length(const ImVec2& c) {
-	return sqrtf(c.x * c.x + c.y * c.y);
+	return sqrtf(lengthSquared(c));
 }
 
 static float distance(const ImVec2& a, const ImVec2& b) {
 	return length(a - b);
 }
 
+// http://stackoverflow.com/questions/849211/shortest-distance-between-a-point-and-a-line-segment
+static float minimumDistance(const ImVec2& v, const ImVec2& w, const ImVec2& p) {
+	// Return minimum distance between line segment vw and point p
+	const float l2 = lengthSquared(v - w);  // i.e. |w-v|^2 -  avoid a sqrt
+	if (l2 == 0.0f) return distance(p, v);  // v == w case
+											// Consider the line extending the segment, parameterized as v + t (w - v).
+											// We find projection of point p onto the line. 
+											// It falls where t = [(p-v) . (w-v)] / |w-v|^2
+											// We clamp t from [0,1] to handle points outside the segment vw.
+	const float t = std::max(0.0f, std::min(1.0f, dot(p - v, w - v) / l2));
+	const ImVec2 projection = v + (w - v) * t;  // Projection falls on the segment
+	return distance(p, projection);
+}
 
 FixedString& FixedString::operator=(const char* const n) {
 	strncpy(data, n, sizeof(data) - 1);
@@ -79,25 +100,57 @@ enum DragState {
 	DragState_Dragging,
 };
 
+void GetBezierCurvePathVertices(ImVector<ImVec2>* path, const ImVec2& p1, const ImVec2& p2, const ImVec2& p3, const ImVec2& p4);
+
+struct BezierCurve {
+	ImVec2 pos0;
+	ImVec2 cp0;
+	ImVec2 cp1;
+	ImVec2 pos1;
+
+	float distanceToPoint(const ImVec2& p) {
+		static ImVector<ImVec2> verts;
+		verts.clear();
+		GetBezierCurvePathVertices(&verts, pos0, cp0, cp1, pos1);
+
+		float minDist = 1e10f;
+		for (int i = 1; i < verts.size(); ++i) {
+			minDist = std::min(minDist, minimumDistance(verts[i-1], verts[i], p));
+		}
+
+		return minDist;
+	}
+};
+
 static Connector s_dragNode;
 static DragState s_dragState = DragState_Default;
 
-void drawNodeLink(ImDrawList *const drawList, const ImVec2& fromPort, const ImVec2& toPort)
+BezierCurve getNodeLinkCurve(const ImVec2& fromPort, const ImVec2& toPort)
 {
 	ImVec2 connectionVector = toPort - fromPort;
-	const float curvature = length(ImVec2(connectionVector.x * 0.5f, connectionVector.y * 0.25f));
-	drawList->AddBezierCurve(
+	float curvature = length(ImVec2(connectionVector.x * 0.5f, connectionVector.y * 0.25f));
+	return {
 		fromPort,
 		fromPort + ImVec2(curvature, 0),
 		toPort + ImVec2(-curvature, 0),
-		toPort,
-		ImColor(200, 200, 100), 3.0f);
+		toPort
+	};
 }
+
+void drawNodeLink(ImDrawList *const drawList, const BezierCurve& c, ImColor col = ImColor(200, 200, 100, 128))
+{
+	drawList->AddBezierCurve(c.pos0, c.cp0, c.cp1, c.pos1, col, 3.0f);
+}
+
+struct LinkState : LinkInfo {
+	BezierCurve curve;
+	bool mark;
+};
 
 struct NodeGraphState
 {
 	std::vector<NodeInfo*> nodes;
-	std::vector<LinkInfo> links;
+	std::vector<LinkState> links;
 
 	ImVec2 scrolling = ImVec2(0.0f, 0.0f);
 	ImVec2 originOffset = ImVec2(0.0f, 0.0f);
@@ -106,7 +159,7 @@ struct NodeGraphState
 	bool openContextMenu = false;
 	NodeInfo* nodeHoveredInScene = nullptr;
 
-	Connector getHoverCon(ImVec2 offset)
+	Connector getHoverCon(ImVec2 offset, float maxDist)
 	{
 		const ImVec2 mousePos = ImGui::GetIO().MousePos;
 
@@ -125,7 +178,7 @@ struct NodeGraphState
 					}
 				}
 
-				if (closestDist < 8.0f) {
+				if (closestDist < maxDist) {
 					return Connector{ node, closest, false };
 				}
 			}
@@ -144,7 +197,7 @@ struct NodeGraphState
 					}
 				}
 
-				if (closestDist < 8.0f) {
+				if (closestDist < maxDist) {
 					return Connector{ node, closest, true };
 				}
 			}
@@ -153,10 +206,11 @@ struct NodeGraphState
 		return Connector::invalid();
 	}
 
-	void drawNodeConnector(ImDrawList* const draw_list, const ImVec2& pos)
+	const float NODE_SLOT_RADIUS = 5.0f;
+
+	void drawNodeConnector(ImDrawList* const draw_list, const ImVec2& pos, ImColor col = ImColor(150, 150, 150, 255))
 	{
-		const float NODE_SLOT_RADIUS = 5.0f;
-		draw_list->AddCircleFilled(pos, NODE_SLOT_RADIUS, ImColor(150, 150, 150, 255), 12);
+		draw_list->AddCircleFilled(pos, NODE_SLOT_RADIUS, col, 12);
 	}
 
 	void stopDragging()
@@ -172,7 +226,7 @@ struct NodeGraphState
 		{
 		case DragState_Default:
 		{
-			if (Connector con = getHoverCon(offset)) {
+			if (Connector con = getHoverCon(offset, NODE_SLOT_RADIUS * 1.5f)) {
 				if (ImGui::IsMouseClicked(0)) {
 					s_dragNode = con;
 					s_dragState = DragState_Dragging;
@@ -183,20 +237,22 @@ struct NodeGraphState
 
 		case DragState_Dragging:
 		{
-			ImDrawList* drawList = ImGui::GetWindowDrawList();
-
-			drawList->ChannelsSetCurrent(1);
+			BezierCurve linkCurve;
 
 			if (s_dragNode.isOutput) {
-				drawNodeLink(drawList, s_dragNode.pos(), ImGui::GetIO().MousePos);
+				linkCurve = getNodeLinkCurve(s_dragNode.pos(), ImGui::GetIO().MousePos);
 			} else {
-				drawNodeLink(drawList, ImGui::GetIO().MousePos, s_dragNode.pos());
+				linkCurve = getNodeLinkCurve(ImGui::GetIO().MousePos, s_dragNode.pos());
 			}
+
+			ImDrawList* drawList = ImGui::GetWindowDrawList();
+			drawList->ChannelsSetCurrent(1);
+			drawNodeLink(drawList, linkCurve);
 
 			const bool drop = !ImGui::IsMouseDown(0);
 
-			Connector con = getHoverCon(offset);
-			if (con && con.node != s_dragNode.node)
+			Connector con = getHoverCon(offset, NODE_SLOT_RADIUS * 3.f);
+			if (con && con.node != s_dragNode.node && con.isOutput != s_dragNode.isOutput)
 			{
 				LinkInfo li;
 				if (s_dragNode.isOutput) {
@@ -206,14 +262,17 @@ struct NodeGraphState
 					li = { con.node, s_dragNode.node, con.port, s_dragNode.port };
 				}
 
-				drawNodeConnector(draw_list, con.pos());
+				drawList->ChannelsSetCurrent(2);
+				drawNodeConnector(draw_list, con.pos(), ImColor(32, 220, 120, 255));
 
 				if (drop)
 				{
 					// Lets connect the nodes.
 					if (backend->onConnected(li))
 					{
-						links.push_back(li);
+						LinkState ls;
+						static_cast<LinkInfo&>(ls) = li;
+						links.push_back(ls);
 					}
 				}
 			}
@@ -260,9 +319,8 @@ struct NodeGraphState
 		}
 
 		if (!selectedNodeFound) {
-			nodeSelected = false;
+			nodeSelected = nullptr;
 		}
-
 		if (!dragNodeFound && s_dragNode.node) {
 			stopDragging();
 		}
@@ -283,6 +341,10 @@ struct NodeGraphState
 	void drawNodes(INodeGraphBackend *const backend, ImDrawList* const draw_list, const ImVec2& offset)
 	{
 		const ImVec2 NODE_WINDOW_PADDING(12.0f, 8.0f);
+
+		if (ImGui::IsMouseClicked(0)) {
+			nodeSelected = nullptr;
+		}
 
 		// Display nodes
 		for (int node_idx = 0; node_idx < nodes.size(); node_idx++)
@@ -399,7 +461,15 @@ struct NodeGraphState
 			NodeImpl* dstNode = link->dstNode->impl;
 			ImVec2 p1 = srcNode->outputSlotPos[link->srcPort];
 			ImVec2 p2 = dstNode->inputSlotPos[link->dstPort];
-			drawNodeLink(draw_list, p1, p2);
+
+			BezierCurve curve = getNodeLinkCurve(p1, p2);
+			float f = curve.distanceToPoint(ImGui::GetMousePos());
+
+			if (f < 10.f) {
+				drawNodeLink(draw_list, curve, ImColor(200, 200, 100, 255));
+			} else {
+				drawNodeLink(draw_list, curve);
+			}
 		}
 	}
 

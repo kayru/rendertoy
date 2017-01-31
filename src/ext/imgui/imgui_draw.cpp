@@ -748,6 +748,13 @@ static void PathBezierToCasteljau(ImVector<ImVec2>* path, float x1, float y1, fl
     }
 }
 
+// RenderToy mod: exposed this, so it can be used to detect node link hover/clicks
+void GetBezierCurvePathVertices(ImVector<ImVec2>* path, const ImVec2& p1, const ImVec2& p2, const ImVec2& p3, const ImVec2& p4)
+{
+	path->push_back(p1);
+	PathBezierToCasteljau(path, p1.x, p1.y, p2.x, p2.y, p3.x, p3.y, p4.x, p4.y, GImGui->Style.CurveTessellationTol, 0);
+}
+
 void ImDrawList::PathBezierCurveTo(const ImVec2& p2, const ImVec2& p3, const ImVec2& p4, int num_segments)
 {
     ImVec2 p1 = _Path.back();
