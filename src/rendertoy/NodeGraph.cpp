@@ -144,7 +144,13 @@ void drawNodeLink(ImDrawList *const drawList, const BezierCurve& c, ImColor col 
 
 struct LinkState : LinkInfo {
 	BezierCurve curve;
-	bool mark;
+	bool mark : 1;
+	bool requestDelete : 1;
+
+	LinkState()
+		: mark(false)
+		, requestDelete(false)
+	{}
 };
 
 struct NodeGraphState
@@ -326,6 +332,17 @@ struct NodeGraphState
 		}
 	}
 
+	void updateLinks()
+	{
+		//auto firstToRemove = std::partition(links.begin(), links.end(), [](const LinkState& s) { return !s.requestDelete; });
+		//links.erase(firstToRemove, links.end());
+
+		links.erase(
+			std::remove_if(links.begin(), links.end(), [](const LinkState& s) { return s.requestDelete; }),
+			links.end()
+		);
+	}
+
 	void drawGrid(ImDrawList* const draw_list, const ImVec2& offset)
 	{
 		ImU32 GRID_COLOR = ImColor(255, 255, 255, 10);
@@ -454,19 +471,24 @@ struct NodeGraphState
 	{
 		// Display links
 		draw_list->ChannelsSetCurrent(1); // Background
-		for (int link_idx = 0; link_idx < links.size(); link_idx++)
+
+		for (LinkState& link : links)
 		{
-			LinkInfo* link = &links[link_idx];
-			NodeImpl* srcNode = link->srcNode->impl;
-			NodeImpl* dstNode = link->dstNode->impl;
-			ImVec2 p1 = srcNode->outputSlotPos[link->srcPort];
-			ImVec2 p2 = dstNode->inputSlotPos[link->dstPort];
+			const NodeImpl* srcNode = link.srcNode->impl;
+			const NodeImpl* dstNode = link.dstNode->impl;
+			const ImVec2& p1 = srcNode->outputSlotPos[link.srcPort];
+			const ImVec2& p2 = dstNode->inputSlotPos[link.dstPort];
 
 			BezierCurve curve = getNodeLinkCurve(p1, p2);
 			float f = curve.distanceToPoint(ImGui::GetMousePos());
 
 			if (f < 10.f) {
 				drawNodeLink(draw_list, curve, ImColor(200, 200, 100, 255));
+
+				const ImGuiIO& io = ImGui::GetIO();
+				if (ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
+					link.requestDelete = true;
+				}
 			} else {
 				drawNodeLink(draw_list, curve);
 			}
@@ -479,6 +501,7 @@ struct NodeGraphState
 		nodeHoveredInScene = nullptr;
 
 		updateNodes(backend);
+		updateLinks();
 
 		ImGui::BeginGroup();
 		ImGui::PushItemWidth(120.0f);
