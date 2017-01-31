@@ -38,6 +38,13 @@ FixedString& FixedString::operator=(const std::string& n) {
 	return *this;
 }
 
+struct NodeImpl
+{
+	ImVec2 Pos = { 0, 0 }, Size = { 0, 0 };
+	std::vector<ImVec2> inputSlotPos;
+	std::vector<ImVec2> outputSlotPos;
+};
+
 struct Connector {
 	NodeInfo* node;
 	size_t port;
@@ -49,6 +56,10 @@ struct Connector {
 		res.port = 0;
 		res.isOutput = false;
 		return res;
+	}
+
+	ImVec2 pos() const {
+		return isOutput ? node->impl->outputSlotPos[port] : node->impl->inputSlotPos[port];
 	}
 
 	operator bool() const {
@@ -63,26 +74,13 @@ struct Connector {
 	}
 };
 
-struct DragNode
-{
-	ImVec2 pos;
-	Connector con;
-};
-
 enum DragState {
 	DragState_Default,
 	DragState_Dragging,
 };
 
-static DragNode s_dragNode;
+static Connector s_dragNode;
 static DragState s_dragState = DragState_Default;
-
-struct NodeImpl
-{
-	ImVec2 Pos = { 0, 0 }, Size = { 0, 0 };
-	std::vector<ImVec2> inputSlotPos;
-	std::vector<ImVec2> outputSlotPos;
-};
 
 void drawNodeLink(ImDrawList *const drawList, const ImVec2& fromPort, const ImVec2& toPort)
 {
@@ -108,7 +106,7 @@ struct NodeGraphState
 	bool openContextMenu = false;
 	NodeInfo* nodeHoveredInScene = nullptr;
 
-	Connector getHoverCon(ImVec2 offset, ImVec2* pos)
+	Connector getHoverCon(ImVec2 offset)
 	{
 		const ImVec2 mousePos = ImGui::GetIO().MousePos;
 
@@ -128,7 +126,6 @@ struct NodeGraphState
 				}
 
 				if (closestDist < 8.0f) {
-					*pos = node->impl->inputSlotPos[closest];
 					return Connector{ node, closest, false };
 				}
 			}
@@ -148,7 +145,6 @@ struct NodeGraphState
 				}
 
 				if (closestDist < 8.0f) {
-					*pos = node->impl->outputSlotPos[closest];
 					return Connector{ node, closest, true };
 				}
 			}
@@ -157,17 +153,28 @@ struct NodeGraphState
 		return Connector::invalid();
 	}
 
-	void updateDraging(INodeGraphBackend *const backend, ImVec2 offset)
+	void drawNodeConnector(ImDrawList* const draw_list, const ImVec2& pos)
+	{
+		const float NODE_SLOT_RADIUS = 5.0f;
+		draw_list->AddCircleFilled(pos, NODE_SLOT_RADIUS, ImColor(150, 150, 150, 255), 12);
+	}
+
+	void stopDragging()
+	{
+		s_dragNode = Connector::invalid();
+		s_dragState = DragState_Default;
+	}
+
+	// Must be called after drawNodes
+	void updateDragging(INodeGraphBackend *const backend, ImDrawList* const draw_list, ImVec2 offset)
 	{
 		switch (s_dragState)
 		{
 		case DragState_Default:
 		{
-			ImVec2 pos;
-			if (Connector con = getHoverCon(offset, &pos)) {
+			if (Connector con = getHoverCon(offset)) {
 				if (ImGui::IsMouseClicked(0)) {
-					s_dragNode.con = con;
-					s_dragNode.pos = pos;
+					s_dragNode = con;
 					s_dragState = DragState_Dragging;
 				}
 			}
@@ -180,36 +187,43 @@ struct NodeGraphState
 
 			drawList->ChannelsSetCurrent(1);
 
-			if (s_dragNode.con.isOutput) {
-				drawNodeLink(drawList, s_dragNode.pos, ImGui::GetIO().MousePos);
+			if (s_dragNode.isOutput) {
+				drawNodeLink(drawList, s_dragNode.pos(), ImGui::GetIO().MousePos);
 			} else {
-				drawNodeLink(drawList, ImGui::GetIO().MousePos, s_dragNode.pos);
+				drawNodeLink(drawList, ImGui::GetIO().MousePos, s_dragNode.pos());
 			}
 
-			if (!ImGui::IsMouseDown(0))
+			const bool drop = !ImGui::IsMouseDown(0);
+
+			Connector con = getHoverCon(offset);
+			if (con && con.node != s_dragNode.node)
 			{
-				ImVec2 pos;
-				Connector con = getHoverCon(offset, &pos);
-
-				// Make sure we are still hovering the same node
-
-				if (!con || con.node == s_dragNode.con.node)
-				{
-					s_dragNode.con = Connector::invalid();
-					s_dragState = DragState_Default;
-					return;
+				LinkInfo li;
+				if (s_dragNode.isOutput) {
+					li = { s_dragNode.node, con.node, s_dragNode.port, con.port };
+				}
+				else {
+					li = { con.node, s_dragNode.node, con.port, s_dragNode.port };
 				}
 
-				// Lets connect the nodes.
-				LinkInfo li = { s_dragNode.con.node, con.node, s_dragNode.con.port, con.port };
-				if (backend->onConnected(li))
-				{
-					links.push_back(li);
-				}
+				drawNodeConnector(draw_list, con.pos());
 
-				s_dragNode.con = Connector::invalid();
-				s_dragState = DragState_Default;
+				if (drop)
+				{
+					// Lets connect the nodes.
+					if (backend->onConnected(li))
+					{
+						links.push_back(li);
+					}
+				}
 			}
+
+			if (drop)
+			{
+				stopDragging();
+				return;
+			}
+
 			break;
 		}
 		}
@@ -224,6 +238,7 @@ struct NodeGraphState
 	{
 		static FreeList<NodeImpl> nodeImplPool;
 		bool selectedNodeFound = false;
+		bool dragNodeFound = false;
 
 		nodes.clear();
 		nodes.resize(backend->getNodeCount());
@@ -238,11 +253,18 @@ struct NodeGraphState
 				if (nodes[i] == nodeSelected) {
 					selectedNodeFound = true;
 				}
+				if (nodes[i] == s_dragNode.node) {
+					dragNodeFound = true;
+				}
 			}
 		}
 
 		if (!selectedNodeFound) {
 			nodeSelected = false;
+		}
+
+		if (!dragNodeFound && s_dragNode.node) {
+			stopDragging();
 		}
 	}
 
@@ -260,7 +282,6 @@ struct NodeGraphState
 
 	void drawNodes(INodeGraphBackend *const backend, ImDrawList* const draw_list, const ImVec2& offset)
 	{
-		const float NODE_SLOT_RADIUS = 5.0f;
 		const ImVec2 NODE_WINDOW_PADDING(12.0f, 8.0f);
 
 		// Display nodes
@@ -318,9 +339,8 @@ struct NodeGraphState
 			ImGui::EndGroup();
 			ImGui::EndGroup();
 
-			/*ImGui::Text("%s", node->Name);
-			ImGui::SliderFloat("##value", &node->Value, 0.0f, 1.0f, "Alpha %.2f");
-			ImGui::ColorEdit3("##color", &node->Color.x);*/
+			// Note: Could draw node interior here
+
 			ImGui::GetCursorPos();
 
 			// Save the size of what we have emitted and whether any of the widgets are being used
@@ -358,11 +378,10 @@ struct NodeGraphState
 			draw_list->ChannelsSetCurrent(2); // Foreground
 
 			for (const ImVec2& pos : node->impl->inputSlotPos) {
-				draw_list->AddCircleFilled(pos, NODE_SLOT_RADIUS, ImColor(150, 150, 150, 255), 12);
-				//draw_list->AddCircle(pos, NODE_SLOT_RADIUS, ImColor(0, 0, 0, 128), 12, 1.0f);
+				drawNodeConnector(draw_list, pos);
 			}
 			for (const ImVec2& pos : node->impl->outputSlotPos) {
-				draw_list->AddCircleFilled(pos, NODE_SLOT_RADIUS, ImColor(150, 150, 150, 255), 12);
+				drawNodeConnector(draw_list, pos);
 			}
 
 			ImGui::PopID();
@@ -392,16 +411,6 @@ struct NodeGraphState
 		updateNodes(backend);
 
 		ImGui::BeginGroup();
-
-		// Create our child canvas
-		//ImGui::Text("Hold middle mouse button to scroll (%.2f,%.2f)", scrolling.x, scrolling.y);
-		//ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(1, 1));
-		/*ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(0, 0));
-		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0, 0));
-		ImGui::PushStyleColor(ImGuiCol_ChildWindowBg, ImColor(44, 44, 44, 200));
-		ImGui::PushStyleColor(ImGuiCol_Border, ImColor(255, 255, 255, 32));
-		const bool scollingRegionBorder = false;
-		ImGui::BeginChild("scrolling_region", ImVec2(0, 0), scollingRegionBorder, ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoMove);*/
 		ImGui::PushItemWidth(120.0f);
 
 		this->originOffset = ImGui::GetCursorScreenPos();
@@ -412,7 +421,7 @@ struct NodeGraphState
 		{
 			drawGrid(draw_list, offset);
 			drawNodes(backend, draw_list, offset);
-			updateDraging(backend, scrolling);
+			updateDragging(backend, draw_list, scrolling);
 			drawLinks(draw_list, offset);
 		}
 		draw_list->ChannelsMerge();
@@ -443,10 +452,6 @@ struct NodeGraphState
 		if (ImGui::IsWindowHovered() && !ImGui::IsAnyItemActive() && ImGui::IsMouseDragging(2, 0.0f))
 			scrolling = scrolling - ImGui::GetIO().MouseDelta;
 
-		/*ImGui::PopItemWidth();
-		ImGui::EndChild();
-		ImGui::PopStyleColor(2);
-		ImGui::PopStyleVar(2);*/
 		ImGui::EndGroup();
 	}
 };
