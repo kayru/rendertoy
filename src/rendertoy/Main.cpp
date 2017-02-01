@@ -17,6 +17,7 @@
 #include <string>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <cctype>
 #include <filesystem>
 #include <fstream>
@@ -308,32 +309,24 @@ struct ParamAnnotation
 	}
 };
 
-struct ShaderParam {
-	ShaderParam() {}
+enum class ShaderParamType {
+	Float,
+	Float2,
+	Float3,
+	Float4,
+	Int,
+	Int2,
+	Int3,
+	Int4,
+	Sampler2d,
+	Image2d,
+	Unknown,
+};
 
-	void assignValue(const ShaderParam& other) {
-		float4Value = other.float4Value;
-		textureValue = other.textureValue;
+struct ShaderParamValue {
+	ShaderParamValue() {
+		memset(this, 0, sizeof(*this));
 	}
-
-	enum class Type {
-		Float,
-		Float2,
-		Float3,
-		Float4,
-		Int,
-		Int2,
-		Int3,
-		Int4,
-		Sampler2d,
-		Image2d,
-		Unknown,
-	};
-
-	std::string name;
-	GLint location;
-	Type type;
-	ParamAnnotation annotation;
 
 	union {
 		float floatValue;
@@ -348,21 +341,90 @@ struct ShaderParam {
 	};
 
 	TextureAsset textureValue;
+
+	void assign(ShaderParamType type, const ShaderParamValue& other) {
+		float4Value = other.float4Value;
+		textureValue = other.textureValue;
+	}
 };
 
-ShaderParam::Type parseShaderType(GLenum type, GLint size)
+struct ShaderParamRefl {
+	std::string name;
+	ShaderParamType type;
+	ParamAnnotation annotation;
+
+	ShaderParamValue defaultValue() const {
+		ShaderParamValue res;
+
+		if (ShaderParamType::Float == type) {
+			res.floatValue = annotation.get("default", 0.0f);
+		}
+		else if (ShaderParamType::Float2 == type) {
+			res.float2Value = vec2(annotation.get("default", 0.0f));
+		}
+		else if (ShaderParamType::Float3 == type) {
+			res.float3Value = vec3(annotation.get("default", annotation.has("color") ? 1.0f : 0.0f));
+		}
+		else if (ShaderParamType::Float4 == type) {
+			res.float4Value = vec4(annotation.get("default", annotation.has("color") ? 1.0f : 0.0f));
+		}
+		else if (ShaderParamType::Int == type) {
+			res.intValue = annotation.get("default", 0);
+		}
+		else if (ShaderParamType::Int2 == type) {
+			res.int2Value = ivec2(annotation.get("default", 0));
+		}
+		else if (ShaderParamType::Int3 == type) {
+			res.int3Value = ivec3(annotation.get("default", 0));
+		}
+		else if (ShaderParamType::Int4 == type) {
+			res.int4Value = ivec4(annotation.get("default", 0));
+		}
+		else if (ShaderParamType::Sampler2d == type) {
+			if (annotation.has("input")) {
+				res.textureValue.source = TextureAsset::Source::Input;
+			}
+			else if (annotation.has("default")) {
+				res.textureValue.path = annotation.get("default", "");
+				res.textureValue.source = TextureAsset::Source::Load;
+				loadTexture(res.textureValue);
+			} else {
+				res.textureValue.source = TextureAsset::Source::Create;
+			}
+		}
+		else if (ShaderParamType::Image2d == type) {
+			if (annotation.has("input")) {
+				res.textureValue.source = TextureAsset::Source::Input;
+			} else if (annotation.has("default")) {
+				res.textureValue.path = annotation.get("default", "");
+				res.textureValue.source = TextureAsset::Source::Load;
+				loadTexture(res.textureValue);
+			} else {
+				res.textureValue.source = TextureAsset::Source::Create;
+			}
+		}
+
+		return res;
+	}
+};
+
+struct ShaderParamBindingRefl : ShaderParamRefl {
+	GLint location;
+};
+
+ShaderParamType parseShaderType(GLenum type, GLint size)
 {
-	static std::unordered_map<GLenum, ShaderParam::Type> tmap = {
-		{ GL_FLOAT, ShaderParam::Type::Float },
-		{ GL_FLOAT_VEC2, ShaderParam::Type::Float2 },
-		{ GL_FLOAT_VEC3, ShaderParam::Type::Float3 },
-		{ GL_FLOAT_VEC4, ShaderParam::Type::Float4 },
-		{ GL_INT, ShaderParam::Type::Int },
-		{ GL_INT_VEC2, ShaderParam::Type::Int2 },
-		{ GL_INT_VEC3, ShaderParam::Type::Int3 },
-		{ GL_INT_VEC4, ShaderParam::Type::Int4 },
-		{ GL_SAMPLER_2D, ShaderParam::Type::Sampler2d },
-		{ GL_IMAGE_2D, ShaderParam::Type::Image2d },
+	static std::unordered_map<GLenum, ShaderParamType> tmap = {
+		{ GL_FLOAT, ShaderParamType::Float },
+		{ GL_FLOAT_VEC2, ShaderParamType::Float2 },
+		{ GL_FLOAT_VEC3, ShaderParamType::Float3 },
+		{ GL_FLOAT_VEC4, ShaderParamType::Float4 },
+		{ GL_INT, ShaderParamType::Int },
+		{ GL_INT_VEC2, ShaderParamType::Int2 },
+		{ GL_INT_VEC3, ShaderParamType::Int3 },
+		{ GL_INT_VEC4, ShaderParamType::Int4 },
+		{ GL_SAMPLER_2D, ShaderParamType::Sampler2d },
+		{ GL_IMAGE_2D, ShaderParamType::Image2d },
 	};
 
 	auto it = tmap.find(type);
@@ -370,7 +432,7 @@ ShaderParam::Type parseShaderType(GLenum type, GLint size)
 		return it->second;
 	}
 
-	return ShaderParam::Type::Unknown;
+	return ShaderParamType::Unknown;
 }
 
 
@@ -432,30 +494,82 @@ bool parseAnnotation(const char* abegin, const char* aend, ParamAnnotation *cons
 	return true;
 }
 
+// Returns 0 on failure
+GLuint makeShader(GLenum shaderType, const std::vector<char>& source, std::string *const errorLog)
+{
+	GLuint handle = glCreateShader(shaderType);
+	if (!handle) {
+		*errorLog = "glCreateShader failed";
+		return 0;
+	}
+
+	GLint sourceLength = (GLint)source.size();
+	const GLchar* sources[1] = { source.data() };
+	glShaderSource(handle, 1, sources, &sourceLength);
+
+	glCompileShader(handle);
+	{
+		GLint shader_ok;
+		glGetShaderiv(handle, GL_COMPILE_STATUS, &shader_ok);
+
+		if (!shader_ok) {
+			*errorLog = getInfoLog(handle, glGetShaderiv, glGetShaderInfoLog);
+			glDeleteShader(handle);
+			return 0;
+		}
+	}
+
+	return handle;
+}
+
+GLuint makeProgram(GLuint computeShader, std::string *const errorLog)
+{
+	GLint program_ok;
+
+	GLuint program = glCreateProgram();
+	glAttachShader(program, computeShader);
+	glProgramParameteri(program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
+	glLinkProgram(program);
+	glGetProgramiv(program, GL_LINK_STATUS, &program_ok);
+
+	if (!program_ok) {
+		*errorLog = getInfoLog(program, glGetProgramiv, glGetProgramInfoLog);
+		glDeleteProgram(program);
+		return 0;
+	}
+
+	return program;
+}
+
+
 struct ComputeShader
 {
-	GLuint newCS = -1;
-	GLuint newProgram = -1;
-	std::vector<ShaderParam> params;
-	std::vector<ShaderParam> previousParams;
-	std::string errorLog;
+	std::vector<ShaderParamBindingRefl> m_params;
+	std::string m_sourceFile;
+	std::string m_errorLog;
+
+	GLuint m_csHandle = -1;
+	GLuint m_programHandle = -1;
+
+	// incremented every time the shader is dynamically reloaded
+	u32 versionId = 0;
 
 	void reflectParams(const std::unordered_map<std::string, ParamAnnotation>& annotations)
 	{
-		params.clear();
 		GLint activeUniformCount = 0;
-		glGetProgramiv(newProgram, GL_ACTIVE_UNIFORMS, &activeUniformCount);
+		glGetProgramiv(m_programHandle, GL_ACTIVE_UNIFORMS, &activeUniformCount);
 		printf("active uniform count: %d\n", activeUniformCount);
 
-		char name[1024];
+		m_params.resize(activeUniformCount);
 
+		char name[1024];
 		for (GLint loc = 0; loc < activeUniformCount; ++loc) {
 			GLsizei nameLength = 0;
 			GLenum typeGl;
 			GLint size;
-			glGetActiveUniform(newProgram, loc, sizeof(name), &nameLength, &size, &typeGl, name);
+			glGetActiveUniform(m_programHandle, loc, sizeof(name), &nameLength, &size, &typeGl, name);
 
-			ShaderParam param;
+			ShaderParamBindingRefl& param = m_params[loc];
 			param.location = loc;
 			param.name = name;
 			param.type = parseShaderType(typeGl, size);
@@ -464,54 +578,10 @@ struct ComputeShader
 			if (it != annotations.end()) {
 				param.annotation = it->second;
 			}
-
-			if (ShaderParam::Type::Float == param.type) {
-				param.floatValue = param.annotation.get("default", 0.0f);
-				params.push_back(param);
-			} else if (ShaderParam::Type::Float2 == param.type) {
-				param.float2Value = vec2(param.annotation.get("default", 0.0f));
-				params.push_back(param);
-			} else if (ShaderParam::Type::Float3 == param.type) {
-				param.float3Value = vec3(param.annotation.get("default", param.annotation.has("color") ? 1.0f : 0.0f));
-				params.push_back(param);
-			} else if (ShaderParam::Type::Float4 == param.type) {
-				param.float4Value = vec4(param.annotation.get("default", param.annotation.has("color") ? 1.0f : 0.0f));
-				params.push_back(param);
-			} else if (ShaderParam::Type::Int == param.type) {
-				param.intValue = param.annotation.get("default", 0);
-				params.push_back(param);
-			} else if (ShaderParam::Type::Int2 == param.type) {
-				param.int2Value = ivec2(param.annotation.get("default", 0));
-				params.push_back(param);
-			} else if (ShaderParam::Type::Int3 == param.type) {
-				param.int3Value = ivec3(param.annotation.get("default", 0));
-				params.push_back(param);
-			} else if (ShaderParam::Type::Int4 == param.type) {
-				param.int4Value = ivec4(param.annotation.get("default", 0));
-				params.push_back(param);
-			} else if (ShaderParam::Type::Sampler2d == param.type) {
-				if (param.annotation.has("input")) {
-					param.textureValue.source = TextureAsset::Source::Input;
-				} else if (param.annotation.has("default")) {
-					param.textureValue.path = param.annotation.get("default", "");
-					param.textureValue.source = TextureAsset::Source::Load;
-					loadTexture(param.textureValue);
-				}
-				params.push_back(param);
-			} else if (ShaderParam::Type::Image2d == param.type) {
-				if (param.annotation.has("input")) {
-					param.textureValue.source = TextureAsset::Source::Input;
-				} else if (param.annotation.has("default")) {
-					param.textureValue.path = param.annotation.get("default", "");
-					param.textureValue.source = TextureAsset::Source::Load;
-					loadTexture(param.textureValue);
-				}
-				params.push_back(param);
-			}
 		}
 	}
 
-	void copyParamValues(const ComputeShader& other)
+	/*void copyParamValues(const ComputeShader& other)
 	{
 		std::unordered_map<std::string, const ShaderParam*> otherParams;
 		for (const ShaderParam& p : other.params) {
@@ -535,7 +605,7 @@ struct ComputeShader
 		for (auto& p : otherParams) {
 			previousParams.push_back(*p.second);
 		}
-	}
+	}*/
 
 	std::unordered_map<std::string, ParamAnnotation> parseAnnotations(const std::vector<char>& source) {
 		std::unordered_map<std::string, ParamAnnotation> result;
@@ -597,85 +667,222 @@ struct ComputeShader
 		return result;
 	}
 
-	ComputeShader() {}
-	ComputeShader(const std::vector<char>& csSource, const std::string sourceFile)
-	{
-		const GLchar* sources[1];
-		GLint         success;
-
-		newCS = glCreateShader(GL_COMPUTE_SHADER);
-		newProgram = glCreateProgram();
-		glAttachShader(newProgram, newCS);
-
-		sources[0] = csSource.data();
-		glShaderSource(newCS, 1, sources, NULL);
-		glCompileShader(newCS);
-		{
-			GLint shader_ok;
-			glGetShaderiv(newCS, GL_COMPILE_STATUS, &shader_ok);
-
-			if (!shader_ok) {
-				printf("Failed to compile shader:\n");
-				this->errorLog = getInfoLog(newCS, glGetShaderiv, glGetShaderInfoLog);
-				glDeleteShader(newCS);
-				glDeleteProgram(newProgram);
-				newCS = -1;
-				newProgram = -1;
-				//getchar();
-				//exit(1);
-			}
+	void updateErrorLogFile() {
+		if (m_errorLog.length() > 0) {
+			std::ofstream(m_sourceFile + ".errors").write(m_errorLog.data(), m_errorLog.size());
 		}
-		glLinkProgram(newProgram);
-		/*{
-			GLint shader_ok;
-			glGetProgramiv(newCS, GL_LINK_STATUS, &shader_ok);
-
-			if (!shader_ok) {
-				printf("Failed to link shader:\n");
-				showInfoLog(newProgram, glGetProgramiv, glGetProgramInfoLog);
-				glDeleteShader(newCS);
-				glDeleteProgram(newProgram);
-				newCS = -1;
-				newProgram = -1;
-				//getchar();
-				//exit(1);
-			}
-		}*/
-
-		if (this->errorLog.length() > 0) {
-			std::ofstream(sourceFile + ".errors").write(this->errorLog.data(), this->errorLog.size());
-		} else {
-			remove(fs::path(sourceFile + ".errors"));
-		}
-
-		if (newProgram != -1) {
-			auto annotations = parseAnnotations(csSource);
-			reflectParams(annotations);
+		else {
+			remove(fs::path(m_sourceFile + ".errors"));
 		}
 	}
+
+	bool reload()
+	{
+		m_errorLog.clear();
+
+		std::vector<char> source = loadShaderSource(m_sourceFile, "");
+		GLuint sHandle = makeShader(GL_COMPUTE_SHADER, source, &m_errorLog);
+		if (!sHandle) {
+			updateErrorLogFile();
+			return false;
+		}
+
+		GLuint pHandle = makeProgram(sHandle, &m_errorLog);
+		if (!pHandle) {
+			updateErrorLogFile();
+			return false;
+		}
+
+		m_programHandle = pHandle;
+		m_csHandle = sHandle;
+		++versionId;
+
+		updateErrorLogFile();
+
+		auto annotations = parseAnnotations(source);
+		reflectParams(annotations);
+		return true;
+	}
+
+	ComputeShader() {}
+	ComputeShader(const std::string sourceFile)
+		: m_sourceFile(sourceFile)
+	{
+		reload();
+	}
+};
+
+struct ShaderParamProxy {
+	const ShaderParamBindingRefl& refl;
+	ShaderParamValue& value;
+
+	ShaderParamProxy* operator*() {
+		return this;
+	}
+
+	ShaderParamProxy* operator->() {
+		return this;
+	}
+};
+
+struct ShaderParamIterProxy {
+	ShaderParamIterProxy(const std::vector<ShaderParamBindingRefl>& refls, std::vector<ShaderParamValue>& values)
+		: refls(refls)
+		, values(values)
+	{
+		assert(refls.size() == values.size());
+	}
+
+	struct Iterator : public std::iterator<std::forward_iterator_tag, Iterator> {
+		Iterator(ShaderParamIterProxy* cont, size_t i)
+			: refls(cont->refls.data())
+			, values(cont->values.data())
+			, i(i)
+		{}
+
+		ShaderParamProxy operator*() const{
+			return ShaderParamProxy { refls[i], values[i] };
+		}
+
+		ShaderParamProxy operator->() const {
+			return ShaderParamProxy{ refls[i], values[i] };
+		}
+
+		bool operator==(const Iterator& other) const {
+			assert(refls == other.refls);
+			return i == other.i;
+		}
+
+		bool operator!=(const Iterator& other) const {
+			assert(refls == other.refls);
+			return i != other.i;
+		}
+
+		bool operator<(const Iterator& other) const {
+			assert(refls == other.refls);
+			return i < other.i;
+		}
+
+		const Iterator& operator++() { ++i; return *this; }
+		Iterator operator++(int) {
+			Iterator result = *this; ++(*this); return result;
+		}
+
+	private:
+		const ShaderParamBindingRefl* refls;
+		ShaderParamValue* values;
+		size_t i;
+	};
+
+	Iterator begin() { return Iterator(this, 0); }
+	Iterator end() { return Iterator(this, refls.size()); }
+
+	friend struct Iterator;
+private:
+	const std::vector<ShaderParamBindingRefl>& refls;
+	std::vector<ShaderParamValue>& values;
 };
 
 struct Pass
 {
 	Pass(const std::string& shaderPath)
-		: m_shaderPath(shaderPath)
 	{
-		m_computeShader = ComputeShader(loadShaderSource(shaderPath, ""), shaderPath);
-		FileWatcher::watchFile(shaderPath.c_str(), [shaderPath, this]()
+		m_computeShader = ComputeShader(shaderPath);
+		updateParams();
+
+		FileWatcher::watchFile(shaderPath.c_str(), [this]()
 		{
-			ComputeShader shader(loadShaderSource(shaderPath, ""), shaderPath);
-			if (shader.newProgram != -1) {
-				shader.copyParamValues(m_computeShader);
-				m_computeShader = shader;
-			} else {
-				m_computeShader.errorLog = shader.errorLog;
+			if (m_computeShader.reload()) {
+				updateParams();
 			}
 		});
 	}
 
-	std::string m_shaderPath;
-	ComputeShader m_computeShader;
+	ShaderParamIterProxy params() {
+		return ShaderParamIterProxy(m_computeShader.m_params, m_paramValues);
+	}
+
+	const ComputeShader& shader() const {
+		return m_computeShader;
+	}
+
 	NodeInfo m_nodeInfo;
+
+private:
+	void updateParams() {
+		std::vector<ShaderParamValue> newValues(m_computeShader.m_params.size());
+
+		for (size_t i = 0; i < newValues.size(); ++i) {
+			ShaderParamBindingRefl& newRefl = m_computeShader.m_params[i];
+			ShaderParamValue& newValue = newValues[i];
+
+			auto curMatch = std::find_if(m_paramRefl.begin(), m_paramRefl.end(), [&](auto& p) { return p.name == newRefl.name; });
+			if (curMatch != m_paramRefl.end()) {
+				if (curMatch->type == newRefl.type) {
+					// Found a value for the new field in the current array
+					newValue = m_paramValues[std::distance(m_paramRefl.begin(), curMatch)];
+				} else {
+					// Otherwise we found the param by name, but the type changed. Use the default.
+					newValue = m_computeShader.m_params[i].defaultValue();
+				}
+
+				// Drop the saved param since we have a new entry for it. We'll nuke params with empty names.
+				curMatch->name.clear();
+			} else {
+				// No match in current params, but maybe we have a match in the m_prevParams array.
+
+				auto prevMatch = std::find_if(m_prevParams.begin(), m_prevParams.end(), [&](auto& p) { return p.refl.name == newRefl.name; });
+				if (prevMatch != m_prevParams.end()) {
+					// Got a match in old params
+					if (prevMatch->refl.type == newRefl.type) {
+						// Type matches, let's go with it
+						newValue = prevMatch->value;
+					} else {
+						// Otherwise we have found an old param, but its type is now different. Use the default.
+						newValue = m_computeShader.m_params[i].defaultValue();
+					}
+
+					// Drop the old param
+					prevMatch->refl.name.clear();
+				} else {
+					// No match found anywhere. Just go with the default.
+					newValue = m_computeShader.m_params[i].defaultValue();
+				}
+			}
+		}
+
+		// Nuke old and current params that we've matched up to the new shader
+		m_prevParams.erase(
+			std::remove_if(m_prevParams.begin(), m_prevParams.end(), [](const auto& p) { return p.refl.name.empty(); }),
+			m_prevParams.end()
+		);
+
+		// All params from the previous shader version that we didn't find in the current one
+		// go to the m_prevParams array, so that we can restore old values upon further shader modifications.
+		for (size_t i = 0; i < m_paramRefl.size(); ++i) {
+			if (!m_paramRefl[i].name.empty()) {
+				m_prevParams.push_back({ m_paramRefl[i], m_paramValues[i] });
+			}
+		}
+
+		newValues.swap(m_paramValues);
+		m_paramRefl.resize(m_computeShader.m_params.size());
+
+		for (size_t i = 0; i < m_paramRefl.size(); ++i) {
+			m_paramRefl[i] = m_computeShader.m_params[i];
+		}
+	}
+
+	ComputeShader m_computeShader;
+	std::vector<ShaderParamValue> m_paramValues;
+
+	// Kept around for preserving previous values across shader reload and shader modifications
+	std::vector<ShaderParamRefl> m_paramRefl;
+	struct PrevShaderParam {
+		ShaderParamRefl refl;
+		ShaderParamValue value;
+	};
+	std::vector<PrevShaderParam> m_prevParams;
 };
 
 struct Package
@@ -716,7 +923,7 @@ Project g_project;
 #undef min
 #include <algorithm>
 
-bool doTextureLoadUi(ShaderParam& param)
+bool doTextureLoadUi(ShaderParamValue& value)
 {
 	bool res = false;
 
@@ -731,13 +938,13 @@ bool doTextureLoadUi(ShaderParam& param)
 		ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
 		if (GetOpenFileNameA(&ofn))
 		{
-			param.textureValue.path = filename;
+			value.textureValue.path = filename;
 			res = true;
 		}
 	}
 
 	ImGui::SameLine();
-	ImGui::Text(param.textureValue.path.c_str());
+	ImGui::Text(value.textureValue.path.c_str());
 
 	return res;
 }
@@ -745,58 +952,61 @@ bool doTextureLoadUi(ShaderParam& param)
 void doPassUi(Pass& pass)
 {
 	int maxLabelWidth = 0;
-	for (auto& param : pass.m_computeShader.params) {
-		maxLabelWidth = std::max(maxLabelWidth, (int)ImGui::CalcTextSize(param.name.c_str()).x);
+	for (auto& param : pass.params()) {
+		maxLabelWidth = std::max(maxLabelWidth, (int)ImGui::CalcTextSize(param.refl.name.c_str()).x);
 	}
 	maxLabelWidth += 10;
 
-	for (auto& param : pass.m_computeShader.params) {
-		ImGui::PushID(param.name.c_str());
+	for (auto& param : pass.params()) {
+		const auto& refl = param.refl;
+		auto& value = param.value;
+
+		ImGui::PushID(refl.name.c_str());
 		ImGui::Columns(2);
 		{
-			const int textWidth = (int)ImGui::CalcTextSize(param.name.c_str()).x;
+			const int textWidth = (int)ImGui::CalcTextSize(refl.name.c_str()).x;
 			ImGui::SetCursorPosX(maxLabelWidth - textWidth);
-			ImGui::Text(param.name.c_str());
+			ImGui::Text(refl.name.c_str());
 		}
 
 		ImGui::SetColumnOffset(1, maxLabelWidth + 10);
 		ImGui::NextColumn();
 
-		if (param.type == ShaderParam::Type::Float) {
-			ImGui::SliderFloat("", &param.floatValue, param.annotation.get("min", 0.0f), param.annotation.get("max", 1.0f));
-		} else if (param.type == ShaderParam::Type::Float2) {
-			ImGui::SliderFloat2("", &param.float2Value.x, param.annotation.get("min", 0.0f), param.annotation.get("max", 1.0f));
-		} else if (param.type == ShaderParam::Type::Float3) {
-			if (param.annotation.has("color")) {
-				ImGui::ColorEdit3("", &param.float3Value.x);
+		if (refl.type == ShaderParamType::Float) {
+			ImGui::SliderFloat("", &value.floatValue, refl.annotation.get("min", 0.0f), refl.annotation.get("max", 1.0f));
+		} else if (refl.type == ShaderParamType::Float2) {
+			ImGui::SliderFloat2("", &value.float2Value.x, refl.annotation.get("min", 0.0f), refl.annotation.get("max", 1.0f));
+		} else if (refl.type == ShaderParamType::Float3) {
+			if (refl.annotation.has("color")) {
+				ImGui::ColorEdit3("", &value.float3Value.x);
 			} else {
-				ImGui::SliderFloat3("", &param.float3Value.x, param.annotation.get("min", 0.0f), param.annotation.get("max", 1.0f));
+				ImGui::SliderFloat3("", &value.float3Value.x, refl.annotation.get("min", 0.0f), refl.annotation.get("max", 1.0f));
 			}
-		} else if (param.type == ShaderParam::Type::Float4) {
-			if (param.annotation.has("color")) {
-				ImGui::ColorEdit4("", &param.float4Value.x);
+		} else if (refl.type == ShaderParamType::Float4) {
+			if (refl.annotation.has("color")) {
+				ImGui::ColorEdit4("", &value.float4Value.x);
 			} else {
-				ImGui::SliderFloat4("", &param.float4Value.x, param.annotation.get("min", 0.0f), param.annotation.get("max", 1.0f));
+				ImGui::SliderFloat4("", &value.float4Value.x, refl.annotation.get("min", 0.0f), refl.annotation.get("max", 1.0f));
 			}
-		} else if (param.type == ShaderParam::Type::Int) {
-			ImGui::SliderInt("", &param.intValue, param.annotation.get("min", 0), param.annotation.get("max", 16));
-		} else if (param.type == ShaderParam::Type::Int2) {
-			ImGui::SliderInt2("", &param.int2Value.x, param.annotation.get("min", 0), param.annotation.get("max", 16));
-		} else if (param.type == ShaderParam::Type::Int3) {
-			ImGui::SliderInt3("", &param.int3Value.x, param.annotation.get("min", 0), param.annotation.get("max", 16));
-		} else if (param.type == ShaderParam::Type::Int4) {
-			ImGui::SliderInt4("", &param.int4Value.x, param.annotation.get("min", 0), param.annotation.get("max", 16));
-		} else if (param.type == ShaderParam::Type::Sampler2d) {
+		} else if (refl.type == ShaderParamType::Int) {
+			ImGui::SliderInt("", &value.intValue, refl.annotation.get("min", 0), refl.annotation.get("max", 16));
+		} else if (refl.type == ShaderParamType::Int2) {
+			ImGui::SliderInt2("", &value.int2Value.x, refl.annotation.get("min", 0), refl.annotation.get("max", 16));
+		} else if (refl.type == ShaderParamType::Int3) {
+			ImGui::SliderInt3("", &value.int3Value.x, refl.annotation.get("min", 0), refl.annotation.get("max", 16));
+		} else if (refl.type == ShaderParamType::Int4) {
+			ImGui::SliderInt4("", &value.int4Value.x, refl.annotation.get("min", 0), refl.annotation.get("max", 16));
+		} else if (refl.type == ShaderParamType::Sampler2d) {
 			{
 				ImGui::PushID("wrapS");
-				int wrapS = param.textureValue.wrapS ? 0 : 1;
+				int wrapS = value.textureValue.wrapS ? 0 : 1;
 				const char* const wrapSValues[] = {
 					"Wrap S",
 					"Clamp S",
 				};
 				ImGui::PushItemWidth(100);
 				ImGui::Combo("", &wrapS, wrapSValues, sizeof(wrapSValues) / sizeof(*wrapSValues));
-				param.textureValue.wrapS = !wrapS;
+				value.textureValue.wrapS = !wrapS;
 				ImGui::PopID();
 			}
 
@@ -804,22 +1014,22 @@ void doPassUi(Pass& pass)
 
 			{
 				ImGui::PushID("wrapT");
-				int wrapT = param.textureValue.wrapT ? 0 : 1;
+				int wrapT = value.textureValue.wrapT ? 0 : 1;
 				const char* const wrapTValues[] = {
 					"Wrap T",
 					"Clamp T",
 				};
 				ImGui::PushItemWidth(100);
 				ImGui::Combo("", &wrapT, wrapTValues, sizeof(wrapTValues) / sizeof(*wrapTValues));
-				param.textureValue.wrapT = !wrapT;
+				value.textureValue.wrapT = !wrapT;
 				ImGui::PopID();
 			}
 
 			ImGui::SameLine();
-			doTextureLoadUi(param);
-		} else if (param.type == ShaderParam::Type::Image2d) {
+			doTextureLoadUi(value);
+		} else if (refl.type == ShaderParamType::Image2d) {
 			ImGui::BeginGroup();
-			int sourceIdx = int(param.textureValue.source);
+			int sourceIdx = int(value.textureValue.source);
 			const char* const sources[] = {
 				"Load",
 				"Create",
@@ -829,15 +1039,15 @@ void doPassUi(Pass& pass)
 			ImGui::PushItemWidth(100);
 			bool selected = ImGui::Combo("", &sourceIdx, sources, sizeof(sources) / sizeof(*sources));
 			ImGui::PopID();
-			const auto prevSource = param.textureValue.source;
-			param.textureValue.source = TextureAsset::Source(sourceIdx);
+			const auto prevSource = value.textureValue.source;
+			value.textureValue.source = TextureAsset::Source(sourceIdx);
 
-			if (TextureAsset::Source::Load == param.textureValue.source) {
+			if (TextureAsset::Source::Load == value.textureValue.source) {
 				ImGui::SameLine();
-				if (selected || doTextureLoadUi(param)) {
-					loadTexture(param.textureValue);
+				if (selected || doTextureLoadUi(value)) {
+					loadTexture(value.textureValue);
 				}
-			} else if (TextureAsset::Source::Create == param.textureValue.source) {
+			} else if (TextureAsset::Source::Create == value.textureValue.source) {
 				int formatIdx = 0;
 				const char* const formats[] = {
 					"rgba16f",
@@ -885,9 +1095,9 @@ void doPassUi(Pass& pass)
 					ImGui::InputInt2("resolution", size);
 				}
 			} else {
-				if (prevSource != param.textureValue.source) {
-					param.textureValue.texture = nullptr;
-					param.textureValue.transientCreated = false;
+				if (prevSource != value.textureValue.source) {
+					value.textureValue.texture = nullptr;
+					value.textureValue.transientCreated = false;
 				}
 			}
 
@@ -900,13 +1110,13 @@ void doPassUi(Pass& pass)
 
 	if (ImGui::Button("Edit shader")) {
 		char shaderPath[1024];
-		GetFullPathName(pass.m_shaderPath.c_str(), sizeof(shaderPath), shaderPath, nullptr);
+		GetFullPathName(pass.shader().m_sourceFile.c_str(), sizeof(shaderPath), shaderPath, nullptr);
 		ShellExecuteA(0, nullptr, shaderPath, 0, 0, SW_SHOW);
 	}
 
-	if (!pass.m_computeShader.errorLog.empty()) {
+	if (!pass.shader().m_errorLog.empty()) {
 		ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1, 0.2, 0.1, 1));
-		ImGui::Text("Compile error:\n%s", pass.m_computeShader.errorLog.c_str());
+		ImGui::Text("Compile error:\n%s", pass.shader().m_errorLog.c_str());
 		ImGui::PopStyleColor();
 	}
 	/*ImGui::Text("Hello, world!");
@@ -1032,9 +1242,9 @@ void drawFullscreenQuad(GLuint tex)
 
 void createPassImages(Pass& pass, int width, int height)
 {
-	for (auto& param : pass.m_computeShader.params) {
-		if (ShaderParam::Type::Image2d == param.type) {
-			TextureAsset& tex = param.textureValue;
+	for (auto& param : pass.params()) {
+		if (ShaderParamType::Image2d == param.refl.type) {
+			TextureAsset& tex = param.value.textureValue;
 
 			if (tex.source != TextureAsset::Source::Create && tex.transientCreated) {
 				tex.texture = nullptr;
@@ -1097,49 +1307,52 @@ void renderProject(int width, int height)
 			glBindImageTexture(img_unit, tex1, level, layered, 0, GL_READ_WRITE, GL_RGBA16F);
 			++img_unit;*/
 
-			glUseProgram(pass->m_computeShader.newProgram);
+			glUseProgram(pass->shader().m_programHandle);
 
-			for (const auto& param : pass->m_computeShader.params) {
-				if (param.type == ShaderParam::Type::Float) {
-					glUniform1f(param.location, param.floatValue);
-				} else if (param.type == ShaderParam::Type::Float2) {
-					glUniform2f(param.location, param.float2Value.x, param.float2Value.y);
-				} else if (param.type == ShaderParam::Type::Float3) {
-					glUniform3f(param.location, param.float3Value.x, param.float3Value.y, param.float3Value.z);
-				} else if (param.type == ShaderParam::Type::Float4) {
-					glUniform4f(param.location, param.float4Value.x, param.float4Value.y, param.float4Value.z, param.float4Value.w);
-				} else if (param.type == ShaderParam::Type::Int) {
-					glUniform1i(param.location, param.intValue);
-				} else if (param.type == ShaderParam::Type::Int2) {
-					glUniform2i(param.location, param.int2Value.x, param.int2Value.y);
-				} else if (param.type == ShaderParam::Type::Int3) {
-					glUniform3i(param.location, param.int3Value.x, param.int3Value.y, param.int3Value.z);
-				} else if (param.type == ShaderParam::Type::Int4) {
-					glUniform4i(param.location, param.int4Value.x, param.int4Value.y, param.int4Value.z, param.int4Value.w);
-				} else if (param.type == ShaderParam::Type::Image2d) {
-					if (param.textureValue.texture) {
+			for (const auto& param : pass->params()) {
+				const auto& refl = param.refl;
+				const auto& value = param.value;
+
+				if (refl.type == ShaderParamType::Float) {
+					glUniform1f(refl.location, value.floatValue);
+				} else if (refl.type == ShaderParamType::Float2) {
+					glUniform2f(refl.location, value.float2Value.x, value.float2Value.y);
+				} else if (refl.type == ShaderParamType::Float3) {
+					glUniform3f(refl.location, value.float3Value.x, value.float3Value.y, value.float3Value.z);
+				} else if (refl.type == ShaderParamType::Float4) {
+					glUniform4f(refl.location, value.float4Value.x, value.float4Value.y, value.float4Value.z, value.float4Value.w);
+				} else if (refl.type == ShaderParamType::Int) {
+					glUniform1i(refl.location, value.intValue);
+				} else if (refl.type == ShaderParamType::Int2) {
+					glUniform2i(refl.location, value.int2Value.x, value.int2Value.y);
+				} else if (refl.type == ShaderParamType::Int3) {
+					glUniform3i(refl.location, value.int3Value.x, value.int3Value.y, value.int3Value.z);
+				} else if (refl.type == ShaderParamType::Int4) {
+					glUniform4i(refl.location, value.int4Value.x, value.int4Value.y, value.int4Value.z, value.int4Value.w);
+				} else if (refl.type == ShaderParamType::Image2d) {
+					if (value.textureValue.texture) {
 						const GLint level = 0;
 						const GLenum layered = GL_FALSE;
-						glBindImageTexture(img_unit, param.textureValue.texture->texId, level, layered, 0, GL_READ_ONLY, GL_RGBA16F);
-						glUniform1i(param.location, img_unit);
+						glBindImageTexture(img_unit, value.textureValue.texture->texId, level, layered, 0, GL_READ_ONLY, GL_RGBA16F);
+						glUniform1i(refl.location, img_unit);
 						++img_unit;
 
 						// HACK
-						if (param.name == "outputTex") {
-							outputTexId = param.textureValue.texture->texId;
+						if (refl.name == "outputTex") {
+							outputTexId = value.textureValue.texture->texId;
 						}
 					}
-				} else if (param.type == ShaderParam::Type::Sampler2d) {
-					if (param.textureValue.texture) {
+				} else if (refl.type == ShaderParamType::Sampler2d) {
+					if (value.textureValue.texture) {
 						const GLint level = 0;
 						const GLenum layered = GL_FALSE;
 						glActiveTexture(GL_TEXTURE0 + tex_unit);
-						glBindTexture(GL_TEXTURE_2D, param.textureValue.texture->texId);
-						glUniform1i(param.location, tex_unit);
+						glBindTexture(GL_TEXTURE_2D, value.textureValue.texture->texId);
+						glUniform1i(refl.location, tex_unit);
 
-						const GLuint samplerId = param.textureValue.texture->samplerId;
-						glSamplerParameteri(samplerId, GL_TEXTURE_WRAP_S, param.textureValue.wrapS ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-						glSamplerParameteri(samplerId, GL_TEXTURE_WRAP_T, param.textureValue.wrapT ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+						const GLuint samplerId = value.textureValue.texture->samplerId;
+						glSamplerParameteri(samplerId, GL_TEXTURE_WRAP_S, value.textureValue.wrapS ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+						glSamplerParameteri(samplerId, GL_TEXTURE_WRAP_T, value.textureValue.wrapT ? GL_REPEAT : GL_CLAMP_TO_EDGE);
 						glBindSampler(tex_unit, samplerId);
 						++tex_unit;
 					}
@@ -1147,7 +1360,7 @@ void renderProject(int width, int height)
 			}
 
 			GLint workGroupSize[3];
-			glGetProgramiv(pass->m_computeShader.newProgram, GL_COMPUTE_WORK_GROUP_SIZE, workGroupSize);
+			glGetProgramiv(pass->shader().m_programHandle, GL_COMPUTE_WORK_GROUP_SIZE, workGroupSize);
 			glDispatchCompute(
 				(width + workGroupSize[0] - 1) / workGroupSize[0],
 				(height + workGroupSize[1] - 1) / workGroupSize[1],
@@ -1197,19 +1410,19 @@ struct ShaderNodeBackend : INodeGraphBackend
 		Pass& pass = *shaderPackage->m_passes[idx];
 		NodeInfo& ni = pass.m_nodeInfo;
 		{
-			std::string filename = fs::path(pass.m_shaderPath).filename().string();
+			std::string filename = fs::path(pass.shader().m_sourceFile).filename().string();
 			ni.name = filename.substr(0, filename.find_last_of("."));
 		}
 
 		ni.inputs.clear();
 		ni.outputs.clear();
 
-		for (ShaderParam& p : pass.m_computeShader.params) {
-			if (p.type == ShaderParam::Type::Image2d) {
-				if (TextureAsset::Source::Create == p.textureValue.source) {
-					ni.outputs.push_back({(size_t)p.name.data(), p.name});
-				} else if (TextureAsset::Source::Input == p.textureValue.source) {
-					ni.inputs.push_back({ (size_t)p.name.data(), p.name });
+		for (auto& p : pass.params()) {
+			if (p.refl.type == ShaderParamType::Image2d) {
+				if (TextureAsset::Source::Create == p.value.textureValue.source) {
+					ni.outputs.push_back({(size_t)p.refl.name.data(), p.refl.name});
+				} else if (TextureAsset::Source::Input == p.value.textureValue.source) {
+					ni.inputs.push_back({ (size_t)p.refl.name.data(), p.refl.name });
 				}
 			}
 		}
@@ -1269,12 +1482,12 @@ struct ShaderNodeBackend : INodeGraphBackend
 
 		const char* srcName = src.m_nodeInfo.outputs[l.srcPort].name.data;
 		const char* dstName = dst.m_nodeInfo.inputs[l.dstPort].name.data;
-		auto p0 = std::find_if(src.m_computeShader.params.begin(), src.m_computeShader.params.end(), [srcName](const ShaderParam& p) { return p.name == srcName; });
-		auto p1 = std::find_if(dst.m_computeShader.params.begin(), dst.m_computeShader.params.end(), [dstName](const ShaderParam& p) { return p.name == dstName; });
-		if (p0 == src.m_computeShader.params.end()) return false;
-		if (p1 == dst.m_computeShader.params.end()) return false;
-		if (p0->type != p1->type || p0->type != ShaderParam::Type::Image2d) return false;
-		p1->textureValue.texture = p0->textureValue.texture;
+		auto p0 = std::find_if(src.params().begin(), src.params().end(), [srcName](const auto& p) { return p.refl.name == srcName; });
+		auto p1 = std::find_if(dst.params().begin(), dst.params().end(), [dstName](const auto& p) { return p.refl.name == dstName; });
+		if (p0 == src.params().end()) return false;
+		if (p1 == dst.params().end()) return false;
+		if (p0->refl.type != p1->refl.type || p0->refl.type != ShaderParamType::Image2d) return false;
+		p1->value.textureValue.texture = p0->value.textureValue.texture;
 
 		return true;
 	}

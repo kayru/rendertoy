@@ -61,9 +61,14 @@ FixedString& FixedString::operator=(const std::string& n) {
 
 struct NodeImpl
 {
+	struct PortState {
+		ImVec2 pos;
+		size_t id;
+	};
+
 	ImVec2 Pos = { 0, 0 }, Size = { 0, 0 };
-	std::vector<ImVec2> inputSlotPos;
-	std::vector<ImVec2> outputSlotPos;
+	std::vector<PortState> inputPortState;
+	std::vector<PortState> outputPortState;
 };
 
 struct Connector {
@@ -80,7 +85,7 @@ struct Connector {
 	}
 
 	ImVec2 pos() const {
-		return isOutput ? node->impl->outputSlotPos[port] : node->impl->inputSlotPos[port];
+		return isOutput ? node->impl->outputPortState[port].pos : node->impl->inputPortState[port].pos;
 	}
 
 	operator bool() const {
@@ -175,7 +180,7 @@ struct NodeGraphState
 
 				for (size_t i = 0; i < node->inputs.size(); ++i)
 				{
-					const float d = distance(node->impl->inputSlotPos[i], mousePos);
+					const float d = distance(node->impl->inputPortState[i].pos, mousePos);
 					if (d < closestDist) {
 						closestDist = d;
 						closest = i;
@@ -193,8 +198,8 @@ struct NodeGraphState
 
 				for (size_t i = 0; i < node->outputs.size(); ++i)
 				{
-					//printf("o: %f %f\n", node->impl->outputSlotPos[i].x, node->impl->outputSlotPos[i].y);
-					const float d = distance(node->impl->outputSlotPos[i], mousePos);
+					//printf("o: %f %f\n", node->impl->outputPortState[i].x, node->impl->outputPortState[i].y);
+					const float d = distance(node->impl->outputPortState[i].pos, mousePos);
 					if (d < closestDist) {
 						closestDist = d;
 						closest = i;
@@ -293,7 +298,7 @@ struct NodeGraphState
 	}
 
 	FreeList<NodeImpl>& nodeImplPool() {
-		FreeList<NodeImpl> inst;
+		static FreeList<NodeImpl> inst;
 		return inst;
 	}
 
@@ -312,7 +317,23 @@ struct NodeGraphState
 
 				nodes[i]->impl = nodeImplPool.alloc();
 				nodes[i]->impl->Pos = mousePos;
+
+				for (auto& port : nodes[i]->inputs) {
+					NodeImpl::PortState ps;
+					ps.id = port.id;
+					nodes[i]->impl->inputPortState.push_back(ps);
+				}
+
+				for (auto& port : nodes[i]->outputs) {
+					NodeImpl::PortState ps;
+					ps.id = port.id;
+					nodes[i]->impl->outputPortState.push_back(ps);
+				}
 			} else {
+				// TODO: link addition, removal
+				assert(nodes[i]->inputs.size() == nodes[i]->impl->inputPortState.size());
+				assert(nodes[i]->outputs.size() == nodes[i]->impl->outputPortState.size());
+
 				if (nodes[i] == nodeSelected) {
 					selectedNodeFound = true;
 				}
@@ -382,11 +403,12 @@ struct NodeGraphState
 			ImGui::BeginGroup();
 
 			ImGui::BeginGroup(); // Lock horizontal position
-			node->impl->inputSlotPos.clear();
-			for (const auto& x : node->inputs) {
+			assert(node->impl->inputPortState.size() == node->inputs.size());
+			for (size_t i = 0; i < node->inputs.size(); ++i) {
+				const auto& x = node->inputs[i];
 				ImVec2 cursorLeft = ImGui::GetCursorScreenPos();
 				ImGui::Text(x.name.data);
-				node->impl->inputSlotPos.push_back(cursorLeft + ImVec2(-NODE_WINDOW_PADDING.x, 0.5f * ImGui::GetItemRectSize().y));
+				node->impl->inputPortState[i].pos = cursorLeft + ImVec2(-NODE_WINDOW_PADDING.x, 0.5f * ImGui::GetItemRectSize().y);
 			}
 			ImGui::EndGroup();
 
@@ -399,17 +421,18 @@ struct NodeGraphState
 			ImGui::BeginGroup(); // Lock horizontal position
 			float cursorStart = ImGui::GetCursorPosX();
 			float maxWidth = 0.0f;
-			node->impl->outputSlotPos.clear();
 			for (const auto& x : node->outputs) {
 				maxWidth = std::max(maxWidth, ImGui::CalcTextSize(x.name.data).x);
 			}
 
-			for (const auto& x : node->outputs) {
+			assert(node->impl->outputPortState.size() == node->outputs.size());
+			for (size_t i = 0; i < node->outputs.size(); ++i) {
+				const auto& x = node->outputs[i];
 				const float width = ImGui::CalcTextSize(x.name.data).x;
 				ImGui::SetCursorPosX(cursorStart + maxWidth - width);
 				ImVec2 cursorLeft = ImGui::GetCursorScreenPos();
 				ImGui::Text(x.name.data);
-				node->impl->outputSlotPos.push_back(cursorLeft + ImVec2(NODE_WINDOW_PADDING.x + width, 0.5f * ImGui::GetItemRectSize().y));
+				node->impl->outputPortState[i].pos = cursorLeft + ImVec2(NODE_WINDOW_PADDING.x + width, 0.5f * ImGui::GetItemRectSize().y);
 			}
 			ImGui::EndGroup();
 
@@ -454,11 +477,11 @@ struct NodeGraphState
 
 			draw_list->ChannelsSetCurrent(2); // Foreground
 
-			for (const ImVec2& pos : node->impl->inputSlotPos) {
-				drawNodeConnector(draw_list, pos);
+			for (const auto& ps : node->impl->inputPortState) {
+				drawNodeConnector(draw_list, ps.pos);
 			}
-			for (const ImVec2& pos : node->impl->outputSlotPos) {
-				drawNodeConnector(draw_list, pos);
+			for (const auto& ps : node->impl->outputPortState) {
+				drawNodeConnector(draw_list, ps.pos);
 			}
 
 			ImGui::PopID();
@@ -474,14 +497,16 @@ struct NodeGraphState
 		{
 			const NodeImpl* srcNode = link.srcNode->impl;
 			const NodeImpl* dstNode = link.dstNode->impl;
-			const ImVec2& p1 = srcNode->outputSlotPos[link.srcPort];
-			const ImVec2& p2 = dstNode->inputSlotPos[link.dstPort];
+			const ImVec2& p1 = srcNode->outputPortState[link.srcPort].pos;
+			const ImVec2& p2 = dstNode->inputPortState[link.dstPort].pos;
 
 			BezierCurve curve = getNodeLinkCurve(p1, p2);
 			float f = curve.distanceToPoint(ImGui::GetMousePos());
 
 			if (f < 10.f) {
 				drawNodeLink(draw_list, curve, ImColor(200, 200, 100, 255));
+
+				// TODO: selection of links.
 
 				const ImGuiIO& io = ImGui::GetIO();
 				if (ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
@@ -529,6 +554,8 @@ struct NodeGraphState
 			if (nodeHoveredInScene != nullptr)
 				nodeSelected = nodeHoveredInScene;
 		}
+
+		// TODO: exclusive selection among nodes and links
 
 		const ImGuiIO& io = ImGui::GetIO();
 		if (nodeSelected && ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
