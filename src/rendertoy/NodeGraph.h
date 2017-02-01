@@ -20,19 +20,22 @@ struct PortInfo
 	FixedString name;
 };
 
+struct NodeInfo;
+struct LinkInfo {
+	NodeInfo* srcNode;
+	NodeInfo* dstNode;
+	size_t srcPort;
+	size_t dstPort;
+};
+
 struct NodeInfo
 {
 	FixedString name;
 	std::vector<PortInfo> inputs;
 	std::vector<PortInfo> outputs;
 	NodeImpl* impl = nullptr;
-};
 
-struct LinkInfo {
-	NodeInfo* srcNode;
-	NodeInfo* dstNode;
-	size_t srcPort;
-	size_t dstPort;
+	void getLinks(std::vector<LinkInfo> *const);
 };
 
 struct INodeGraphBackend
@@ -42,8 +45,7 @@ struct INodeGraphBackend
 	virtual NodeInfo* getNodeByIdx(size_t idx) = 0;
 
 	// Called by the graph editor upon various actions
-	virtual bool onConnected(const LinkInfo&) = 0;
-	virtual void onDisconnected(const LinkInfo&) = 0;
+	virtual bool canConnect(const LinkInfo&) = 0;
 	virtual void onTriggered(const NodeInfo*) = 0;
 	virtual void onDeleted(const NodeInfo*) = 0;
 	virtual void onContextMenu(const NodeInfo*) = 0;

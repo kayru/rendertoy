@@ -139,7 +139,7 @@ struct CreatedTexture {
 	}
 };
 
-struct TextureAsset {
+struct TextureDesc {
 	enum class Source {
 		Load,
 		Create,
@@ -150,8 +150,10 @@ struct TextureAsset {
 	Source source = Source::Create;
 	bool wrapS = true;
 	bool wrapT = true;
-	bool transientCreated = false;
+};
 
+struct TextureAsset : TextureDesc {
+	bool transientCreated = false;
 	shared_ptr<CreatedTexture> texture;
 };
 
@@ -340,7 +342,7 @@ struct ShaderParamValue {
 		ivec4 int4Value;
 	};
 
-	TextureAsset textureValue;
+	TextureDesc textureValue;
 
 	void assign(ShaderParamType type, const ShaderParamValue& other) {
 		float4Value = other.float4Value;
@@ -382,25 +384,23 @@ struct ShaderParamRefl {
 		}
 		else if (ShaderParamType::Sampler2d == type) {
 			if (annotation.has("input")) {
-				res.textureValue.source = TextureAsset::Source::Input;
+				res.textureValue.source = TextureDesc::Source::Input;
 			}
 			else if (annotation.has("default")) {
 				res.textureValue.path = annotation.get("default", "");
-				res.textureValue.source = TextureAsset::Source::Load;
-				loadTexture(res.textureValue);
+				res.textureValue.source = TextureDesc::Source::Load;
 			} else {
-				res.textureValue.source = TextureAsset::Source::Create;
+				res.textureValue.source = TextureDesc::Source::Create;
 			}
 		}
 		else if (ShaderParamType::Image2d == type) {
 			if (annotation.has("input")) {
-				res.textureValue.source = TextureAsset::Source::Input;
+				res.textureValue.source = TextureDesc::Source::Input;
 			} else if (annotation.has("default")) {
 				res.textureValue.path = annotation.get("default", "");
-				res.textureValue.source = TextureAsset::Source::Load;
-				loadTexture(res.textureValue);
+				res.textureValue.source = TextureDesc::Source::Load;
 			} else {
-				res.textureValue.source = TextureAsset::Source::Create;
+				res.textureValue.source = TextureDesc::Source::Create;
 			}
 		}
 
@@ -715,6 +715,7 @@ struct ComputeShader
 struct ShaderParamProxy {
 	const ShaderParamBindingRefl& refl;
 	ShaderParamValue& value;
+	const u64 uid;
 
 	ShaderParamProxy* operator*() {
 		return this;
@@ -726,26 +727,32 @@ struct ShaderParamProxy {
 };
 
 struct ShaderParamIterProxy {
-	ShaderParamIterProxy(const std::vector<ShaderParamBindingRefl>& refls, std::vector<ShaderParamValue>& values)
+	ShaderParamIterProxy(
+		const std::vector<ShaderParamBindingRefl>& refls,
+		std::vector<ShaderParamValue>& values,
+		const std::vector<u64>& uids)
 		: refls(refls)
 		, values(values)
+		, uids(uids)
 	{
 		assert(refls.size() == values.size());
+		assert(refls.size() == uids.size());
 	}
 
 	struct Iterator : public std::iterator<std::forward_iterator_tag, Iterator> {
 		Iterator(ShaderParamIterProxy* cont, size_t i)
 			: refls(cont->refls.data())
 			, values(cont->values.data())
+			, uids(cont->uids.data())
 			, i(i)
 		{}
 
 		ShaderParamProxy operator*() const{
-			return ShaderParamProxy { refls[i], values[i] };
+			return ShaderParamProxy { refls[i], values[i], uids[i] };
 		}
 
 		ShaderParamProxy operator->() const {
-			return ShaderParamProxy{ refls[i], values[i] };
+			return ShaderParamProxy{ refls[i], values[i], uids[i] };
 		}
 
 		bool operator==(const Iterator& other) const {
@@ -771,6 +778,7 @@ struct ShaderParamIterProxy {
 	private:
 		const ShaderParamBindingRefl* refls;
 		ShaderParamValue* values;
+		const u64* uids;
 		size_t i;
 	};
 
@@ -781,6 +789,7 @@ struct ShaderParamIterProxy {
 private:
 	const std::vector<ShaderParamBindingRefl>& refls;
 	std::vector<ShaderParamValue>& values;
+	const std::vector<u64>& uids;
 };
 
 struct Pass
@@ -799,7 +808,7 @@ struct Pass
 	}
 
 	ShaderParamIterProxy params() {
-		return ShaderParamIterProxy(m_computeShader.m_params, m_paramValues);
+		return ShaderParamIterProxy(m_computeShader.m_params, m_paramValues, m_paramUids);
 	}
 
 	const ComputeShader& shader() const {
@@ -809,21 +818,31 @@ struct Pass
 	NodeInfo m_nodeInfo;
 
 private:
+	u64 nextParamUid() {
+		static u64 i = 0;
+		return ++i;
+	}
+
 	void updateParams() {
 		std::vector<ShaderParamValue> newValues(m_computeShader.m_params.size());
+		std::vector<u64> newUids(m_computeShader.m_params.size());
 
 		for (size_t i = 0; i < newValues.size(); ++i) {
 			ShaderParamBindingRefl& newRefl = m_computeShader.m_params[i];
 			ShaderParamValue& newValue = newValues[i];
+			u64& newUid = newUids[i];
 
 			auto curMatch = std::find_if(m_paramRefl.begin(), m_paramRefl.end(), [&](auto& p) { return p.name == newRefl.name; });
 			if (curMatch != m_paramRefl.end()) {
 				if (curMatch->type == newRefl.type) {
 					// Found a value for the new field in the current array
-					newValue = m_paramValues[std::distance(m_paramRefl.begin(), curMatch)];
+					const size_t src = std::distance(m_paramRefl.begin(), curMatch);
+					newValue = m_paramValues[src];
+					newUid = m_paramUids[src];
 				} else {
 					// Otherwise we found the param by name, but the type changed. Use the default.
 					newValue = m_computeShader.m_params[i].defaultValue();
+					newUid = nextParamUid();
 				}
 
 				// Drop the saved param since we have a new entry for it. We'll nuke params with empty names.
@@ -848,6 +867,8 @@ private:
 					// No match found anywhere. Just go with the default.
 					newValue = m_computeShader.m_params[i].defaultValue();
 				}
+
+				newUid = nextParamUid();
 			}
 		}
 
@@ -866,6 +887,7 @@ private:
 		}
 
 		newValues.swap(m_paramValues);
+		newUids.swap(m_paramUids);
 		m_paramRefl.resize(m_computeShader.m_params.size());
 
 		for (size_t i = 0; i < m_paramRefl.size(); ++i) {
@@ -875,6 +897,7 @@ private:
 
 	ComputeShader m_computeShader;
 	std::vector<ShaderParamValue> m_paramValues;
+	std::vector<u64> m_paramUids;
 
 	// Kept around for preserving previous values across shader reload and shader modifications
 	std::vector<ShaderParamRefl> m_paramRefl;
@@ -923,10 +946,8 @@ Project g_project;
 #undef min
 #include <algorithm>
 
-bool doTextureLoadUi(ShaderParamValue& value)
+void doTextureLoadUi(ShaderParamValue& value)
 {
-	bool res = false;
-
 	if (ImGui::Button("Browse...")) {
 		OPENFILENAME ofn = {};
 		char filename[1024] = { '\0' };
@@ -939,14 +960,11 @@ bool doTextureLoadUi(ShaderParamValue& value)
 		if (GetOpenFileNameA(&ofn))
 		{
 			value.textureValue.path = filename;
-			res = true;
 		}
 	}
 
 	ImGui::SameLine();
 	ImGui::Text(value.textureValue.path.c_str());
-
-	return res;
 }
 
 void doPassUi(Pass& pass)
@@ -1040,14 +1058,12 @@ void doPassUi(Pass& pass)
 			bool selected = ImGui::Combo("", &sourceIdx, sources, sizeof(sources) / sizeof(*sources));
 			ImGui::PopID();
 			const auto prevSource = value.textureValue.source;
-			value.textureValue.source = TextureAsset::Source(sourceIdx);
+			value.textureValue.source = TextureDesc::Source(sourceIdx);
 
-			if (TextureAsset::Source::Load == value.textureValue.source) {
+			if (TextureDesc::Source::Load == value.textureValue.source) {
 				ImGui::SameLine();
-				if (selected || doTextureLoadUi(value)) {
-					loadTexture(value.textureValue);
-				}
-			} else if (TextureAsset::Source::Create == value.textureValue.source) {
+				doTextureLoadUi(value);
+			} else if (TextureDesc::Source::Create == value.textureValue.source) {
 				int formatIdx = 0;
 				const char* const formats[] = {
 					"rgba16f",
@@ -1093,11 +1109,6 @@ void doPassUi(Pass& pass)
 					ImGui::PushItemWidth(100);
 					ImGui::SameLine();
 					ImGui::InputInt2("resolution", size);
-				}
-			} else {
-				if (prevSource != value.textureValue.source) {
-					value.textureValue.texture = nullptr;
-					value.textureValue.transientCreated = false;
 				}
 			}
 
@@ -1240,15 +1251,15 @@ void drawFullscreenQuad(GLuint tex)
 	glUseProgram(0);
 }
 
-void createPassImages(Pass& pass, int width, int height)
+/*void createPassImages(Pass& pass, int width, int height)
 {
 	for (auto& param : pass.params()) {
 		if (ShaderParamType::Image2d == param.refl.type) {
-			TextureAsset& tex = param.value.textureValue;
+			TextureDesc& tex = param.value.textureValue;
 
-			if (tex.source != TextureAsset::Source::Create && tex.transientCreated) {
+			if (tex.source != TextureDesc::Source::Create && tex.transientCreated) {
 				tex.texture = nullptr;
-			} else if (tex.source == TextureAsset::Source::Create) {
+			} else if (tex.source == TextureDesc::Source::Create) {
 				if (tex.texture && (tex.texture->width != width || tex.texture->height != height)) {
 					tex.texture = nullptr;
 				}
@@ -1268,11 +1279,11 @@ void createPassImages(Pass& pass, int width, int height)
 			}
 		}
 	}
-}
+}*/
 
 void renderProject(int width, int height)
 {
-	GLuint outputTexId = -1;
+	/*GLuint outputTexId = -1;
 
 	for (shared_ptr<Package>& package : g_project.m_packages) {
 		for (shared_ptr<Pass>& pass : package->m_passes) {
@@ -1280,32 +1291,6 @@ void renderProject(int width, int height)
 
 			GLint img_unit = 0;
 			GLint tex_unit = 0;
-
-			/*
-			// TODO
-			static GLuint tex1 = -1;
-			static int prevWidth = 0;
-			static int prevHeight = 0;
-
-			if (prevWidth != width || prevHeight != height && tex1 != -1) {
-				glDeleteTextures(1, &tex1);
-				tex1 = -1;
-			}
-
-			if (-1 == tex1) {
-				glGenTextures(1, &tex1);
-				glBindTexture(GL_TEXTURE_2D, tex1);
-				glTexStorage2D(GL_TEXTURE_2D, 1u, GL_RGBA16F, width, height);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-				glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
-				prevWidth = width;
-				prevHeight = height;
-			}
-
-			const GLint level = 0;
-			const GLenum layered = GL_FALSE;
-			glBindImageTexture(img_unit, tex1, level, layered, 0, GL_READ_WRITE, GL_RGBA16F);
-			++img_unit;*/
 
 			glUseProgram(pass->shader().m_programHandle);
 
@@ -1370,7 +1355,7 @@ void renderProject(int width, int height)
 		if (outputTexId != -1) {
 			drawFullscreenQuad(outputTexId);
 		}
-	}
+	}*/
 }
 
 void APIENTRY openGLDebugCallback(
@@ -1419,10 +1404,10 @@ struct ShaderNodeBackend : INodeGraphBackend
 
 		for (auto& p : pass.params()) {
 			if (p.refl.type == ShaderParamType::Image2d) {
-				if (TextureAsset::Source::Create == p.value.textureValue.source) {
-					ni.outputs.push_back({(size_t)p.refl.name.data(), p.refl.name});
-				} else if (TextureAsset::Source::Input == p.value.textureValue.source) {
-					ni.inputs.push_back({ (size_t)p.refl.name.data(), p.refl.name });
+				if (TextureDesc::Source::Create == p.value.textureValue.source) {
+					ni.outputs.push_back({ p.uid, p.refl.name });
+				} else if (TextureDesc::Source::Input == p.value.textureValue.source) {
+					ni.inputs.push_back({ p.uid, p.refl.name });
 				}
 			}
 		}
@@ -1474,11 +1459,9 @@ struct ShaderNodeBackend : INodeGraphBackend
 	// Called once to initialize connections
 	//void getLinks(std::vector<LinkInfo> *const) override {}
 
-	bool onConnected(const LinkInfo& l) override {
+	bool canConnect(const LinkInfo& l) override {
 		Pass& src = *getPass(l.srcNode);
 		Pass& dst = *getPass(l.dstNode);
-
-		// HACK
 
 		const char* srcName = src.m_nodeInfo.outputs[l.srcPort].name.data;
 		const char* dstName = dst.m_nodeInfo.inputs[l.dstPort].name.data;
@@ -1487,12 +1470,10 @@ struct ShaderNodeBackend : INodeGraphBackend
 		if (p0 == src.params().end()) return false;
 		if (p1 == dst.params().end()) return false;
 		if (p0->refl.type != p1->refl.type || p0->refl.type != ShaderParamType::Image2d) return false;
-		p1->value.textureValue.texture = p0->value.textureValue.texture;
+		//p1->value.textureValue.texture = p0->value.textureValue.texture;
 
 		return true;
 	}
-
-	void onDisconnected(const LinkInfo& l) override {}
 
 	void onTriggered(const NodeInfo* node) override {
 		triggeredNode = node;

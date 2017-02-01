@@ -69,7 +69,40 @@ struct NodeImpl
 	ImVec2 Pos = { 0, 0 }, Size = { 0, 0 };
 	std::vector<PortState> inputPortState;
 	std::vector<PortState> outputPortState;
+	std::vector<u32> linkIndices;
+
+	void onLinkRemoved(u32 idx)
+	{
+		for (u32& i : linkIndices) {
+			if (i == idx) {
+				i = linkIndices.back();
+				linkIndices.pop_back();
+				return;
+			}
+		}
+
+		// Link must be in the list
+		assert(false);
+	}
+
+	void onLinkIdxChanged(u32 prevIdx, u32 newIdx)
+	{
+		for (u32& i : linkIndices) {
+			if (i == prevIdx) {
+				i = newIdx;
+				return;
+			}
+		}
+
+		// Link must be in the list
+		assert(false);
+	}
 };
+
+void NodeInfo::getLinks(std::vector<LinkInfo> *const)
+{
+	// TODO
+}
 
 struct Connector {
 	NodeInfo* node;
@@ -277,11 +310,14 @@ struct NodeGraphState
 				if (drop)
 				{
 					// Lets connect the nodes.
-					if (backend->onConnected(li))
+					if (backend->canConnect(li))
 					{
 						LinkState ls;
 						static_cast<LinkInfo&>(ls) = li;
+						const u32 linkIndex = links.size();
 						links.push_back(ls);
+						ls.srcNode->impl->linkIndices.push_back(linkIndex);
+						ls.dstNode->impl->linkIndices.push_back(linkIndex);
 					}
 				}
 			}
@@ -302,6 +338,123 @@ struct NodeGraphState
 		return inst;
 	}
 
+	// Clear the impl's ports and replace them with the backend provided ones in NodeInfo
+	void overrideNodeImplPortsFromBackend(NodeInfo& node)
+	{
+		node.impl->inputPortState.clear();
+		node.impl->outputPortState.clear();
+
+		node.impl->inputPortState.reserve(node.inputs.size());
+		node.impl->outputPortState.reserve(node.outputs.size());
+
+		for (auto& port : node.inputs) {
+			NodeImpl::PortState ps;
+			ps.id = port.id;
+			node.impl->inputPortState.push_back(ps);
+		}
+
+		for (auto& port : node.outputs) {
+			NodeImpl::PortState ps;
+			ps.id = port.id;
+			node.impl->outputPortState.push_back(ps);
+		}
+	}
+
+	void updateNodePorts(NodeInfo& node)
+	{
+		// Find which input ports have been removed and also nuke the links using those
+		for (u32 inputPortIdx = 0; inputPortIdx < node.impl->inputPortState.size(); ++inputPortIdx) {
+			auto& ps = node.impl->inputPortState[inputPortIdx];
+			bool found = false;
+
+			for (auto& port : node.inputs) {
+				if (port.id == ps.id) {
+					found = true;
+					break;
+				}
+			}
+
+			if (!found) {
+				for (u32 linkIdx : node.impl->linkIndices) {
+					LinkState& ls = links[linkIdx];
+					assert(ls.srcNode == &node || ls.dstNode == &node);
+					if (ls.dstNode == &node && ls.dstPort == inputPortIdx) {
+						ls.requestDelete = true;
+					}
+				}
+			}
+		}
+
+		// Find which output ports have been removed and also nuke the links using those
+		for (u32 outputPortIdx = 0; outputPortIdx < node.impl->outputPortState.size(); ++outputPortIdx) {
+			auto& ps = node.impl->outputPortState[outputPortIdx];
+			bool found = false;
+
+			for (auto& port : node.outputs) {
+				if (port.id == ps.id) {
+					found = true;
+					break;
+				}
+			}
+
+			if (!found) {
+				for (u32 linkIdx : node.impl->linkIndices) {
+					LinkState& ls = links[linkIdx];
+					assert(ls.srcNode == &node || ls.dstNode == &node);
+					if (ls.srcNode == &node && ls.srcPort == outputPortIdx) {
+						ls.requestDelete = true;
+					}
+				}
+			}
+		}
+
+		// Transform links used by this node to use port uids instead of indices.
+		// This will allow us to reorder UIDs, and transform back at the end.
+
+		for (u32 linkIdx : node.impl->linkIndices) {
+			LinkState& ls = links[linkIdx];
+			if (ls.requestDelete) continue;
+			if (ls.srcNode == &node) {
+				ls.srcPort = node.impl->outputPortState[ls.srcPort].id;
+			} else {
+				assert(ls.dstNode == &node);
+				ls.dstPort = node.impl->inputPortState[ls.dstPort].id;
+			}
+		}
+
+		// Now drop the old port info and replace it with the backend's.
+
+		overrideNodeImplPortsFromBackend(node);
+
+		// Finally translate link UIDs back to indices
+
+		for (u32 linkIdx : node.impl->linkIndices) {
+			LinkState& ls = links[linkIdx];
+			if (ls.requestDelete) continue;
+			if (ls.srcNode == &node) {
+				ls.srcPort =
+					std::distance(node.impl->outputPortState.begin(),
+						std::find_if(
+							node.impl->outputPortState.begin(),
+							node.impl->outputPortState.end(),
+							[&ls](const NodeImpl::PortState& p) { return p.id == ls.srcPort; }
+						));
+				assert(ls.srcPort < node.impl->outputPortState.size());
+			}
+			else {
+				assert(ls.dstNode == &node);
+				ls.dstPort =
+					std::distance(node.impl->inputPortState.begin(),
+						std::find_if(
+							node.impl->inputPortState.begin(),
+							node.impl->inputPortState.end(),
+							[&ls](const NodeImpl::PortState& p) { return p.id == ls.dstPort; }
+				));
+				assert(ls.dstPort < node.impl->inputPortState.size());
+			}
+		}
+	}
+
 	void updateNodes(INodeGraphBackend *const backend)
 	{
 		static FreeList<NodeImpl> nodeImplPool;
@@ -318,21 +471,36 @@ struct NodeGraphState
 				nodes[i]->impl = nodeImplPool.alloc();
 				nodes[i]->impl->Pos = mousePos;
 
-				for (auto& port : nodes[i]->inputs) {
-					NodeImpl::PortState ps;
-					ps.id = port.id;
-					nodes[i]->impl->inputPortState.push_back(ps);
+				overrideNodeImplPortsFromBackend(*nodes[i]);
+			} else {
+				auto& nodeImpl = *nodes[i]->impl;
+
+				// If any ports have been changed by the backend, we need to perform some bookkeeping.
+				// There are multiple indices which need maintaining, and it's a non-trivial operation,
+				// therefore we want to skip it if nothing changed.
+
+				bool nodePortsChanged =
+					nodes[i]->inputs.size() != nodes[i]->impl->inputPortState.size()
+				||	nodes[i]->outputs.size() != nodes[i]->impl->outputPortState.size();
+
+				// If the number of ports is the same, individual ones could still have changed. Check the UIDs.
+
+				for (u32 inputPortIdx = 0; !nodePortsChanged && inputPortIdx < nodeImpl.inputPortState.size(); ++inputPortIdx) {
+					if (nodeImpl.inputPortState[inputPortIdx].id != nodes[i]->inputs[inputPortIdx].id) {
+						nodePortsChanged = true;
+					}
 				}
 
-				for (auto& port : nodes[i]->outputs) {
-					NodeImpl::PortState ps;
-					ps.id = port.id;
-					nodes[i]->impl->outputPortState.push_back(ps);
+				for (u32 outputPortIdx = 0; !nodePortsChanged && outputPortIdx < nodeImpl.outputPortState.size(); ++outputPortIdx) {
+					if (nodeImpl.outputPortState[outputPortIdx].id != nodes[i]->outputs[outputPortIdx].id) {
+						nodePortsChanged = true;
+					}
 				}
-			} else {
-				// TODO: link addition, removal
-				assert(nodes[i]->inputs.size() == nodes[i]->impl->inputPortState.size());
-				assert(nodes[i]->outputs.size() == nodes[i]->impl->outputPortState.size());
+
+				if (nodePortsChanged) {
+					// Ports changed, perform the bookkeeping.
+					updateNodePorts(*nodes[i]);
+				}
 
 				if (nodes[i] == nodeSelected) {
 					selectedNodeFound = true;
@@ -351,10 +519,37 @@ struct NodeGraphState
 		}
 	}
 
+	void onLinkRemoved(u32 idx)
+	{
+		links[idx].srcNode->impl->onLinkRemoved(idx);
+		links[idx].dstNode->impl->onLinkRemoved(idx);
+	}
+
+	void onLinkIdxChanged(u32 prevIdx, u32 newIdx)
+	{
+		links[newIdx].srcNode->impl->onLinkIdxChanged(prevIdx, newIdx);
+		links[newIdx].dstNode->impl->onLinkIdxChanged(prevIdx, newIdx);
+	}
+
 	void updateLinks()
 	{
 		//auto firstToRemove = std::partition(links.begin(), links.end(), [](const LinkState& s) { return !s.requestDelete; });
 		//links.erase(firstToRemove, links.end());
+
+		for (u32 i = 0; i < links.size();) {
+			if (links[i].requestDelete) {
+				onLinkRemoved(i);
+				if (links.size() > i + 1) {
+					links[i] = links.back();
+					links.pop_back();
+					onLinkIdxChanged((u32)links.size() , i);
+				} else {
+					links.pop_back();
+				}
+			} else {
+				++i;
+			}
+		}
 
 		links.erase(
 			std::remove_if(links.begin(), links.end(), [](const LinkState& s) { return s.requestDelete; }),
