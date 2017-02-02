@@ -46,7 +46,7 @@ static float minimumDistance(const ImVec2& v, const ImVec2& w, const ImVec2& p) 
 	return distance(p, projection);
 }
 
-FixedString& FixedString::operator=(const char* const n) {
+/*FixedString& FixedString::operator=(const char* const n) {
 	strncpy(data, n, sizeof(data) - 1);
 	data[sizeof(data) - 1] = '\0';
 	return *this;
@@ -57,68 +57,35 @@ FixedString& FixedString::operator=(const std::string& n) {
 	strncpy(data, n.data(), maxLen);
 	data[maxLen] = '\0';
 	return *this;
-}
+}*/
 
-struct NodeImpl
-{
-	struct PortState {
-		ImVec2 pos;
-		size_t id;
-	};
-
-	ImVec2 Pos = { 0, 0 }, Size = { 0, 0 };
-	std::vector<PortState> inputPortState;
-	std::vector<PortState> outputPortState;
-	std::vector<u32> linkIndices;
-
-	void onLinkRemoved(u32 idx)
-	{
-		for (u32& i : linkIndices) {
-			if (i == idx) {
-				i = linkIndices.back();
-				linkIndices.pop_back();
-				return;
-			}
-		}
-
-		// Link must be in the list
-		assert(false);
-	}
-
-	void onLinkIdxChanged(u32 prevIdx, u32 newIdx)
-	{
-		for (u32& i : linkIndices) {
-			if (i == prevIdx) {
-				i = newIdx;
-				return;
-			}
-		}
-
-		// Link must be in the list
-		assert(false);
-	}
+struct PortState {
+	ImVec2 pos;
 };
 
-void NodeInfo::getLinks(std::vector<LinkInfo> *const)
+struct NodeState
 {
-	// TODO
-}
+	ImVec2 Pos = { 0, 0 };
+	ImVec2 Size = { 0, 0 };
+};
 
-struct Connector {
-	NodeInfo* node;
+/*struct Connector
+{
 	size_t port;
 	bool isOutput;
 
 	static Connector invalid() {
 		Connector res;
-		res.node = nullptr;
+		//res.node = nullptr;
 		res.port = 0;
 		res.isOutput = false;
 		return res;
 	}
 
 	ImVec2 pos() const {
-		return isOutput ? node->impl->outputPortState[port].pos : node->impl->inputPortState[port].pos;
+		//return isOutput ? node->impl->outputPortState[port].pos : node->impl->inputPortState[port].pos;
+		assert(false);		// TODO
+		return ImVec2();
 	}
 
 	operator bool() const {
@@ -131,7 +98,7 @@ struct Connector {
 	bool operator!=(const Connector& o) const {
 		return !(*this == o);
 	}
-};
+};*/
 
 enum DragState {
 	DragState_Default,
@@ -160,6 +127,11 @@ struct BezierCurve {
 	}
 };
 
+struct Connector {
+	nodegraph::port_handle port;
+	bool isOutput;
+};
+
 static Connector s_dragNode;
 static DragState s_dragState = DragState_Default;
 
@@ -180,72 +152,76 @@ void drawNodeLink(ImDrawList *const drawList, const BezierCurve& c, ImColor col 
 	drawList->AddBezierCurve(c.pos0, c.cp0, c.cp1, c.pos1, col, 3.0f);
 }
 
-struct LinkState : LinkInfo {
+/*struct LinkState : LinkInfo {
 	BezierCurve curve;
 	bool requestDelete : 1;
 
 	LinkState()
 		: requestDelete(false)
 	{}
-};
+};*/
 
 struct NodeGraphState
 {
-	std::vector<NodeInfo*> nodes;
-	std::vector<LinkState> links;
+	std::vector<NodeState> nodes;
+	std::vector<PortState> ports;
 
 	ImVec2 scrolling = ImVec2(0.0f, 0.0f);
 	ImVec2 originOffset = ImVec2(0.0f, 0.0f);
-	NodeInfo* nodeSelected = nullptr;
+	nodegraph::node_handle nodeSelected;
 
 	bool openContextMenu = false;
-	NodeInfo* nodeHoveredInScene = nullptr;
+	nodegraph::node_handle nodeHoveredInScene;
 
-	Connector getHoverCon(ImVec2 offset, float maxDist)
+	Connector getHoverCon(const nodegraph::Graph& graph, ImVec2 offset, float maxDist)
 	{
 		const ImVec2 mousePos = ImGui::GetIO().MousePos;
+		Connector result;
 
-		for (NodeInfo* node : nodes)
+		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
 		{
+			const nodegraph::Node& node = graph.nodes[nodeHandle.idx];
+
 			{
 				float closestDist = 1e5f;
-				size_t closest = 0;
+				nodegraph::port_handle closest;
 
-				for (size_t i = 0; i < node->inputs.size(); ++i)
+				graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
 				{
-					const float d = distance(node->impl->inputPortState[i].pos, mousePos);
+					const float d = distance(ports[portHandle.idx].pos, mousePos);
 					if (d < closestDist) {
 						closestDist = d;
-						closest = i;
+						closest = portHandle;
 					}
-				}
+				});
 
 				if (closestDist < maxDist) {
-					return Connector{ node, closest, false };
+					result = Connector{ closest, false };
+					return;
 				}
 			}
 
 			{
 				float closestDist = 1e5f;
-				size_t closest = 0;
+				nodegraph::port_handle closest;
 
-				for (size_t i = 0; i < node->outputs.size(); ++i)
+				graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
 				{
-					//printf("o: %f %f\n", node->impl->outputPortState[i].x, node->impl->outputPortState[i].y);
-					const float d = distance(node->impl->outputPortState[i].pos, mousePos);
+					const float d = distance(ports[portHandle.idx].pos, mousePos);
 					if (d < closestDist) {
 						closestDist = d;
-						closest = i;
+						closest = portHandle;
 					}
-				}
+				});
 
 				if (closestDist < maxDist) {
-					return Connector{ node, closest, true };
+					result = Connector{ closest, true };
+					return;
 				}
 			}
-		}
+		});
 
-		return Connector::invalid();
+		return result;
 	}
 
 	const float NODE_SLOT_RADIUS = 5.0f;
@@ -257,18 +233,29 @@ struct NodeGraphState
 
 	void stopDragging()
 	{
-		s_dragNode = Connector::invalid();
+		s_dragNode = Connector();
 		s_dragState = DragState_Default;
 	}
 
+	ImVec2 getPortPos(nodegraph::port_idx h) const
+	{
+		return ports[h].pos;
+	}
+
+	ImVec2 getPortPos(nodegraph::port_handle h) const
+	{
+		return ports[h.idx].pos;
+	}
+
 	// Must be called after drawNodes
-	void updateDragging(INodeGraphBackend *const backend, ImDrawList* const draw_list, ImVec2 offset)
+	void updateDragging(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider, ImDrawList* const draw_list, ImVec2 offset)
 	{
 		switch (s_dragState)
 		{
 		case DragState_Default:
 		{
-			if (Connector con = getHoverCon(offset, NODE_SLOT_RADIUS * 1.5f)) {
+			Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 1.5f);
+			if (con.port.valid()) {
 				if (ImGui::IsMouseClicked(0)) {
 					s_dragNode = con;
 					s_dragState = DragState_Dragging;
@@ -282,9 +269,9 @@ struct NodeGraphState
 			BezierCurve linkCurve;
 
 			if (s_dragNode.isOutput) {
-				linkCurve = getNodeLinkCurve(s_dragNode.pos(), ImGui::GetIO().MousePos);
+				linkCurve = getNodeLinkCurve(getPortPos(s_dragNode.port), ImGui::GetIO().MousePos);
 			} else {
-				linkCurve = getNodeLinkCurve(ImGui::GetIO().MousePos, s_dragNode.pos());
+				linkCurve = getNodeLinkCurve(ImGui::GetIO().MousePos, getPortPos(s_dragNode.port));
 			}
 
 			ImDrawList* drawList = ImGui::GetWindowDrawList();
@@ -293,31 +280,38 @@ struct NodeGraphState
 
 			const bool drop = !ImGui::IsMouseDown(0);
 
-			Connector con = getHoverCon(offset, NODE_SLOT_RADIUS * 3.f);
-			if (con && con.node != s_dragNode.node && con.isOutput != s_dragNode.isOutput)
+			Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 3.f);
+			if (con.port.valid())
 			{
-				LinkInfo li;
-				if (s_dragNode.isOutput) {
-					li = { s_dragNode.node, con.node, s_dragNode.port, con.port };
-				}
-				else {
-					li = { con.node, s_dragNode.node, con.port, s_dragNode.port };
-				}
+				nodegraph::node_handle dragNode = graph.getPortNode(s_dragNode.port);
+				nodegraph::node_handle conNode = graph.getPortNode(con.port);
 
-				drawList->ChannelsSetCurrent(2);
-				drawNodeConnector(draw_list, con.pos(), ImColor(32, 220, 120, 255));
-
-				if (drop)
+				if (conNode.idx != dragNode.idx && con.isOutput != s_dragNode.isOutput)
 				{
-					// Lets connect the nodes.
-					if (backend->canConnect(li))
+					nodegraph::LinkDesc li;
+					if (s_dragNode.isOutput) {
+						li = { dragNode, s_dragNode.port, conNode, con.port };
+					}
+					else {
+						li = { conNode, con.port, dragNode, s_dragNode.port };
+					}
+
+					drawList->ChannelsSetCurrent(2);
+					drawNodeConnector(draw_list, getPortPos(con.port), ImColor(32, 220, 120, 255));
+
+					if (drop)
 					{
-						LinkState ls;
-						static_cast<LinkInfo&>(ls) = li;
-						const u32 linkIndex = links.size();
-						links.push_back(ls);
-						ls.srcNode->impl->linkIndices.push_back(linkIndex);
-						ls.dstNode->impl->linkIndices.push_back(linkIndex);
+						// Lets connect the nodes.
+						//if (backend->canConnect(li))
+						{
+							/*LinkState ls;
+							static_cast<LinkInfo&>(ls) = li;
+							const u32 linkIndex = links.size();
+							links.push_back(ls);
+							ls.srcNode->impl->linkIndices.push_back(linkIndex);
+							ls.dstNode->impl->linkIndices.push_back(linkIndex);*/
+							graph.addLink(li);
+						}
 					}
 				}
 			}
@@ -333,7 +327,7 @@ struct NodeGraphState
 		}
 	}
 
-	FreeList<NodeImpl>& nodeImplPool() {
+	/*FreeList<NodeImpl>& nodeImplPool() {
 		static FreeList<NodeImpl> inst;
 		return inst;
 	}
@@ -555,6 +549,165 @@ struct NodeGraphState
 			std::remove_if(links.begin(), links.end(), [](const LinkState& s) { return s.requestDelete; }),
 			links.end()
 		);
+	}*/
+
+	void drawNodes(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider, ImDrawList* const draw_list, const ImVec2& offset)
+	{
+		const ImVec2 NODE_WINDOW_PADDING(12.0f, 8.0f);
+
+		if (ImGui::IsMouseClicked(0)) {
+			nodeSelected = nodegraph::node_handle();
+		}
+
+		// Display nodes
+		//for (int node_idx = 0; node_idx < nodes.size(); node_idx++)
+		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		{
+			NodeState& node = nodes[nodeHandle.idx];
+			ImGui::PushID(nodeHandle.idx);
+			ImVec2 node_rect_min = offset + node.Pos;
+
+			// Display node contents first
+			draw_list->ChannelsSetCurrent(2); // Foreground
+			bool old_any_active = ImGui::IsAnyItemActive();
+			ImGui::SetCursorScreenPos(node_rect_min + NODE_WINDOW_PADDING);
+
+			ImGui::BeginGroup();
+			ImGui::Text(infoProvider.getNodeName(nodeHandle).c_str());
+			ImGui::Dummy(ImVec2(0, 5));
+
+			const float nodeHeaderMaxY = ImGui::GetCursorScreenPos().y;
+
+			ImGui::BeginGroup();
+
+			ImGui::BeginGroup(); // Lock horizontal position
+			//assert(node->impl->inputPortState.size() == node->inputs.size());
+			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
+			{
+				ImVec2 cursorLeft = ImGui::GetCursorScreenPos();
+				ImGui::Text(infoProvider.getPortName(portHandle).c_str());
+				ports[portHandle.idx].pos = cursorLeft + ImVec2(-NODE_WINDOW_PADDING.x, 0.5f * ImGui::GetItemRectSize().y);
+			});
+			ImGui::EndGroup();
+
+			// Make some space in the middle
+			ImGui::SameLine();
+			ImGui::Dummy(ImVec2(20, 0));
+
+			ImGui::SameLine();
+
+			ImGui::BeginGroup(); // Lock horizontal position
+			float cursorStart = ImGui::GetCursorPosX();
+			float maxWidth = 0.0f;
+			//for (const auto& x : node->outputs) {
+			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
+				maxWidth = std::max(maxWidth, ImGui::CalcTextSize(infoProvider.getPortName(portHandle).c_str()).x);
+			});
+
+			//assert(node->impl->outputPortState.size() == node->outputs.size());
+			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
+			{
+				const std::string name = infoProvider.getPortName(portHandle);
+				const float width = ImGui::CalcTextSize(name.c_str()).x;
+				ImGui::SetCursorPosX(cursorStart + maxWidth - width);
+				ImVec2 cursorLeft = ImGui::GetCursorScreenPos();
+				ImGui::Text(name.c_str());
+				ports[portHandle.idx].pos = cursorLeft + ImVec2(NODE_WINDOW_PADDING.x + width, 0.5f * ImGui::GetItemRectSize().y);
+			});
+			ImGui::EndGroup();
+
+			ImGui::EndGroup();
+			ImGui::EndGroup();
+
+			// Note: Could draw node interior here
+
+			ImGui::GetCursorPos();
+
+			// Save the size of what we have emitted and whether any of the widgets are being used
+			bool node_widgets_active = (!old_any_active && ImGui::IsAnyItemActive());
+			node.Size = ImGui::GetItemRectSize() + NODE_WINDOW_PADDING + NODE_WINDOW_PADDING;
+			ImVec2 node_rect_max = node_rect_min + node.Size;
+
+			// Display node box
+			draw_list->ChannelsSetCurrent(0); // Background
+			ImGui::SetCursorScreenPos(node_rect_min);
+			ImGui::InvisibleButton("node", node.Size);
+			if (ImGui::IsItemHovered())
+			{
+				nodeHoveredInScene = nodeHandle;
+				openContextMenu |= ImGui::IsMouseClicked(1);
+
+				if (ImGui::IsMouseDoubleClicked(0)) {
+					// TODO
+					//backend->onTriggered(node);
+				}
+			}
+			bool node_moving_active = ImGui::IsItemActive();
+			if (node_widgets_active || node_moving_active)
+				nodeSelected = nodeHandle;
+			if (node_moving_active && ImGui::IsMouseDragging(0) && s_dragState == DragState_Default)
+				node.Pos = node.Pos + ImGui::GetIO().MouseDelta;
+
+			ImU32 node_bg_color = (nodeHoveredInScene == nodeHandle || nodeSelected == nodeHandle) ? ImColor(75, 75, 75) : ImColor(60, 60, 60);
+			draw_list->AddRectFilled(node_rect_min, node_rect_max, node_bg_color, 8.0f);
+			draw_list->AddRectFilled(node_rect_min, ImVec2(node_rect_max.x, nodeHeaderMaxY - 6), ImColor(255, 255, 255, 32), 8.0f, 1 | 2);
+
+			ImColor frameColor = ImColor(255, 255, 255, 20);
+			draw_list->AddLine(ImVec2(node_rect_min.x, nodeHeaderMaxY - 6 - 1), ImVec2(node_rect_max.x, nodeHeaderMaxY - 6 - 1), frameColor);
+			draw_list->AddRect(node_rect_min, node_rect_max, frameColor, 8.0f);
+
+			draw_list->ChannelsSetCurrent(2); // Foreground
+
+			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
+			{
+				drawNodeConnector(draw_list, ports[portHandle.idx].pos);
+			});
+
+			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
+			{
+				drawNodeConnector(draw_list, ports[portHandle.idx].pos);
+			});
+
+			ImGui::PopID();
+		});
+	}
+
+	void drawLinks(nodegraph::Graph& graph, ImDrawList* const draw_list, const ImVec2& offset)
+	{
+		// Display links
+		draw_list->ChannelsSetCurrent(1); // Background
+
+		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		{
+			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
+			{
+				const nodegraph::Port& port = graph.ports[portHandle.idx];
+				if (port.link != nodegraph::invalid_link_idx) {
+					const nodegraph::Link& link = graph.links[port.link];
+
+					ImVec2 p1 = getPortPos(link.srcPort);
+					ImVec2 p2 = getPortPos(link.dstPort);
+
+					BezierCurve curve = getNodeLinkCurve(p1, p2);
+					float f = curve.distanceToPoint(ImGui::GetMousePos());
+
+					if (f < 10.f) {
+						drawNodeLink(draw_list, curve, ImColor(200, 200, 100, 255));
+
+						// TODO: selection of links.
+
+						const ImGuiIO& io = ImGui::GetIO();
+						if (ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
+							//link.requestDelete = true;
+							// TODO
+						}
+					}
+					else {
+						drawNodeLink(draw_list, curve);
+					}
+				}
+			});
+		});
 	}
 
 	void drawGrid(ImDrawList* const draw_list, const ImVec2& offset)
@@ -569,157 +722,25 @@ struct NodeGraphState
 			draw_list->AddLine(ImVec2(0.0f, y) + win_pos, ImVec2(canvas_sz.x, y) + win_pos, GRID_COLOR);
 	}
 
-	void drawNodes(INodeGraphBackend *const backend, ImDrawList* const draw_list, const ImVec2& offset)
-	{
-		const ImVec2 NODE_WINDOW_PADDING(12.0f, 8.0f);
-
-		if (ImGui::IsMouseClicked(0)) {
-			nodeSelected = nullptr;
-		}
-
-		// Display nodes
-		for (int node_idx = 0; node_idx < nodes.size(); node_idx++)
-		{
-			NodeInfo* node = nodes[node_idx];
-			ImGui::PushID(node);
-			ImVec2 node_rect_min = offset + node->impl->Pos;
-
-			// Display node contents first
-			draw_list->ChannelsSetCurrent(2); // Foreground
-			bool old_any_active = ImGui::IsAnyItemActive();
-			ImGui::SetCursorScreenPos(node_rect_min + NODE_WINDOW_PADDING);
-
-			ImGui::BeginGroup();
-			ImGui::Text(node->name.data);
-			ImGui::Dummy(ImVec2(0, 5));
-
-			const float nodeHeaderMaxY = ImGui::GetCursorScreenPos().y;
-
-			ImGui::BeginGroup();
-
-			ImGui::BeginGroup(); // Lock horizontal position
-			assert(node->impl->inputPortState.size() == node->inputs.size());
-			for (size_t i = 0; i < node->inputs.size(); ++i) {
-				const auto& x = node->inputs[i];
-				ImVec2 cursorLeft = ImGui::GetCursorScreenPos();
-				ImGui::Text(x.name.data);
-				node->impl->inputPortState[i].pos = cursorLeft + ImVec2(-NODE_WINDOW_PADDING.x, 0.5f * ImGui::GetItemRectSize().y);
-			}
-			ImGui::EndGroup();
-
-			// Make some space in the middle
-			ImGui::SameLine();
-			ImGui::Dummy(ImVec2(20, 0));
-
-			ImGui::SameLine();
-
-			ImGui::BeginGroup(); // Lock horizontal position
-			float cursorStart = ImGui::GetCursorPosX();
-			float maxWidth = 0.0f;
-			for (const auto& x : node->outputs) {
-				maxWidth = std::max(maxWidth, ImGui::CalcTextSize(x.name.data).x);
-			}
-
-			assert(node->impl->outputPortState.size() == node->outputs.size());
-			for (size_t i = 0; i < node->outputs.size(); ++i) {
-				const auto& x = node->outputs[i];
-				const float width = ImGui::CalcTextSize(x.name.data).x;
-				ImGui::SetCursorPosX(cursorStart + maxWidth - width);
-				ImVec2 cursorLeft = ImGui::GetCursorScreenPos();
-				ImGui::Text(x.name.data);
-				node->impl->outputPortState[i].pos = cursorLeft + ImVec2(NODE_WINDOW_PADDING.x + width, 0.5f * ImGui::GetItemRectSize().y);
-			}
-			ImGui::EndGroup();
-
-			ImGui::EndGroup();
-			ImGui::EndGroup();
-
-			// Note: Could draw node interior here
-
-			ImGui::GetCursorPos();
-
-			// Save the size of what we have emitted and whether any of the widgets are being used
-			bool node_widgets_active = (!old_any_active && ImGui::IsAnyItemActive());
-			node->impl->Size = ImGui::GetItemRectSize() + NODE_WINDOW_PADDING + NODE_WINDOW_PADDING;
-			ImVec2 node_rect_max = node_rect_min + node->impl->Size;
-
-			// Display node box
-			draw_list->ChannelsSetCurrent(0); // Background
-			ImGui::SetCursorScreenPos(node_rect_min);
-			ImGui::InvisibleButton("node", node->impl->Size);
-			if (ImGui::IsItemHovered())
-			{
-				nodeHoveredInScene = node;
-				openContextMenu |= ImGui::IsMouseClicked(1);
-
-				if (ImGui::IsMouseDoubleClicked(0)) {
-					backend->onTriggered(node);
-				}
-			}
-			bool node_moving_active = ImGui::IsItemActive();
-			if (node_widgets_active || node_moving_active)
-				nodeSelected = node;
-			if (node_moving_active && ImGui::IsMouseDragging(0) && s_dragState == DragState_Default)
-				node->impl->Pos = node->impl->Pos + ImGui::GetIO().MouseDelta;
-
-			ImU32 node_bg_color = (nodeHoveredInScene == node || nodeSelected == node) ? ImColor(75, 75, 75) : ImColor(60, 60, 60);
-			draw_list->AddRectFilled(node_rect_min, node_rect_max, node_bg_color, 8.0f);
-			draw_list->AddRectFilled(node_rect_min, ImVec2(node_rect_max.x, nodeHeaderMaxY - 6), ImColor(255, 255, 255, 32), 8.0f, 1 | 2);
-
-			ImColor frameColor = ImColor(255, 255, 255, 20);
-			draw_list->AddLine(ImVec2(node_rect_min.x, nodeHeaderMaxY - 6 - 1), ImVec2(node_rect_max.x, nodeHeaderMaxY - 6 - 1), frameColor);
-			draw_list->AddRect(node_rect_min, node_rect_max, frameColor, 8.0f);
-
-			draw_list->ChannelsSetCurrent(2); // Foreground
-
-			for (const auto& ps : node->impl->inputPortState) {
-				drawNodeConnector(draw_list, ps.pos);
-			}
-			for (const auto& ps : node->impl->outputPortState) {
-				drawNodeConnector(draw_list, ps.pos);
-			}
-
-			ImGui::PopID();
-		}
-	}
-
-	void drawLinks(ImDrawList* const draw_list, const ImVec2& offset)
-	{
-		// Display links
-		draw_list->ChannelsSetCurrent(1); // Background
-
-		for (LinkState& link : links)
-		{
-			const NodeImpl* srcNode = link.srcNode->impl;
-			const NodeImpl* dstNode = link.dstNode->impl;
-			const ImVec2& p1 = srcNode->outputPortState[link.srcPort].pos;
-			const ImVec2& p2 = dstNode->inputPortState[link.dstPort].pos;
-
-			BezierCurve curve = getNodeLinkCurve(p1, p2);
-			float f = curve.distanceToPoint(ImGui::GetMousePos());
-
-			if (f < 10.f) {
-				drawNodeLink(draw_list, curve, ImColor(200, 200, 100, 255));
-
-				// TODO: selection of links.
-
-				const ImGuiIO& io = ImGui::GetIO();
-				if (ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
-					link.requestDelete = true;
-				}
-			} else {
-				drawNodeLink(draw_list, curve);
-			}
-		}
-	}
-
-	void doGui(INodeGraphBackend *const backend)
+	void doGui(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider)
 	{
 		openContextMenu = false;
-		nodeHoveredInScene = nullptr;
+		nodeHoveredInScene = nodegraph::node_handle();
 
-		updateNodes(backend);
-		updateLinks();
+		nodes.resize(graph.nodes.size());
+		ports.resize(graph.ports.size());
+
+		// TODO: spawning of multiple nodes with offsets
+		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		{
+			if (nodes[nodeHandle.idx].Size.x == 0) {
+				const ImVec2 mousePos = ImGui::GetIO().MousePos + scrolling - this->originOffset;
+				nodes[nodeHandle.idx].Pos = mousePos;
+			}
+		});
+
+		//updateNodes(backend);
+		//updateLinks();
 
 		ImGui::BeginGroup();
 		ImGui::PushItemWidth(120.0f);
@@ -731,29 +752,29 @@ struct NodeGraphState
 		draw_list->ChannelsSplit(3);
 		{
 			drawGrid(draw_list, offset);
-			drawNodes(backend, draw_list, offset);
-			updateDragging(backend, draw_list, scrolling);
-			drawLinks(draw_list, offset);
+			drawNodes(graph, infoProvider, draw_list, offset);
+			updateDragging(graph, infoProvider, draw_list, scrolling);
+			drawLinks(graph, draw_list, offset);
 		}
 		draw_list->ChannelsMerge();
 
 		// Open context menu
 		if (!ImGui::IsAnyItemHovered() && ImGui::IsMouseHoveringWindow() && ImGui::IsMouseClicked(1))
 		{
-			nodeSelected = nodeHoveredInScene = nullptr;
+			nodeSelected = nodeHoveredInScene = nodegraph::node_handle();
 			openContextMenu = true;
 		}
 		if (openContextMenu)
 		{
 			ImGui::OpenPopup("context_menu");
-			if (nodeHoveredInScene != nullptr)
+			if (nodeHoveredInScene.valid())
 				nodeSelected = nodeHoveredInScene;
 		}
 
 		// TODO: exclusive selection among nodes and links
 
 		const ImGuiIO& io = ImGui::GetIO();
-		if (nodeSelected && ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
+		/*if (nodeSelected && ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
 			for (auto& l : links) {
 				if (l.dstNode == nodeSelected || l.srcNode == nodeSelected) {
 					l.requestDelete = true;
@@ -764,13 +785,13 @@ struct NodeGraphState
 			backend->onDeleted(nodeSelected);
 			nodeSelected = nullptr;
 			nodeImplPool().free(impl);
-		}
+		}*/
 
 		// Draw context menu
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
 		if (ImGui::BeginPopup("context_menu"))
 		{
-			backend->onContextMenu(nodeSelected);
+			infoProvider.onContextMenu(/*nodeSelected*/);
 			ImGui::EndPopup();
 		}
 		ImGui::PopStyleVar();
@@ -787,8 +808,9 @@ static std::unordered_map<ImGuiID, NodeGraphState> g_nodeGraphs;
 
 // Really dumb data structure provided for the example.
 // Note that we storing links are INDICES (not ID) to make example code shorter, obviously a bad idea for any general purpose code.
-void nodeGraph(INodeGraphBackend *const backend)
+//void nodeGraph(INodeGraphBackend *const backend)
+void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider)
 {
-	const ImGuiID id = ImGui::GetID(backend);
-	g_nodeGraphs[id].doGui(backend);
+	const ImGuiID id = ImGui::GetID(&graph);
+	g_nodeGraphs[id].doGui(graph, infoProvider);
 }

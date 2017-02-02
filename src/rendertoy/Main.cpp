@@ -815,7 +815,7 @@ struct Pass
 		return m_computeShader;
 	}
 
-	NodeInfo m_nodeInfo;
+	nodegraph::node_handle m_nodeHandle;
 
 private:
 	u64 nextParamUid() {
@@ -911,9 +911,38 @@ private:
 struct Package
 {
 	vector<shared_ptr<Pass>> m_passes;
+	nodegraph::Graph graph;
 
 	void deletePass(Pass* p) {
 		m_passes.erase(std::remove_if(m_passes.begin(), m_passes.end(), [p](const auto& other){ return other.get() == p; }), m_passes.end());
+	}
+
+	void getNodeDesc(Pass& pass, nodegraph::NodeDesc *const desc)
+	{
+		desc->inputs.clear();
+		desc->outputs.clear();
+
+		for (auto& p : pass.params()) {
+			if (p.refl.type == ShaderParamType::Image2d) {
+				if (TextureDesc::Source::Create == p.value.textureValue.source) {
+					desc->outputs.push_back(p.uid);
+				}
+				else if (TextureDesc::Source::Input == p.value.textureValue.source) {
+					desc->inputs.push_back(p.uid);
+				}
+			}
+		}
+	}
+
+	void updateGraph()
+	{
+		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		{
+			Pass& pass = *m_passes[nodeHandle.idx];
+			nodegraph::NodeDesc desc;
+			getNodeDesc(pass, &desc);
+			graph.updateNode(nodeHandle, desc);
+		});
 	}
 
 	void handleFileDrop(const std::string& path)
@@ -921,6 +950,10 @@ struct Package
 		if (ends_with(path, ".glsl")) {
 			auto pass = make_shared<Pass>(path);
 			m_passes.emplace_back(pass);
+
+			nodegraph::NodeDesc desc;
+			getNodeDesc(*m_passes.back(), &desc);
+			graph.addNode(desc);
 
 			//ImGui::Node* n1 = nge.addNode(0, ImVec2(200, 50));
 		}
@@ -1376,9 +1409,80 @@ void APIENTRY openGLDebugCallback(
 	}
 }
 
-struct ShaderNodeBackend : INodeGraphBackend
+struct NodeGraphGuiInfoProvider : INodeGraphGuiInfoProvider
 {
-	shared_ptr<Package> shaderPackage = nullptr;
+	std::vector<std::string> nodeNames;
+	std::vector<std::string> portNames;
+
+	void updateInfoFromPackage(Package& package)
+	{
+		nodegraph::Graph& graph = package.graph;
+		nodeNames.resize(graph.nodes.size());
+		portNames.resize(graph.ports.size());
+
+		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		{
+			Pass& pass = *package.m_passes[nodeHandle.idx];
+			nodeNames[nodeHandle.idx] = pass.shader().m_sourceFile;
+
+			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
+				const nodegraph::Port& port = graph.ports[portHandle.idx];
+				portNames[portHandle.idx] =
+					std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
+						return param.uid == port.uid;
+					})->refl.name;
+			});
+
+			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
+				const nodegraph::Port& port = graph.ports[portHandle.idx];
+				portNames[portHandle.idx] =
+					std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
+					return param.uid == port.uid;
+				})->refl.name;
+			});
+		});
+	}
+
+	std::string getNodeName(nodegraph::node_handle h) const override
+	{
+		return nodeNames[h.idx];
+	}
+	
+	std::string getPortName(nodegraph::port_handle h) const override
+	{
+		return portNames[h.idx];
+	}
+
+	void onContextMenu() override
+	{
+		std::vector<std::string> items;
+		getGlobalContextMenuItems(&items);
+
+		for (std::string& it : items) {
+			if (ImGui::MenuItem(it.c_str(), NULL, false, true)) {
+				onGlobalContextMenuSelected(it);
+			}
+		}
+	}
+
+	void getGlobalContextMenuItems(std::vector<std::string> *const items)
+	{
+		std::vector<fs::path> files;
+		getFilesMatchingExtension("data", ".glsl", files);
+
+		for (const fs::path& f : files) {
+			std::string filename = f.filename().string();
+			items->push_back(filename.substr(0, filename.find_last_of(".")));
+		}
+	}
+
+	void onGlobalContextMenuSelected(const std::string& shaderFile)
+	{
+		g_project.handleFileDrop("data/" + shaderFile + ".glsl");
+	}
+
+
+	/*shared_ptr<Package> shaderPackage = nullptr;
 	const NodeInfo* triggeredNode = nullptr;
 
 	static Pass* getPass(const NodeInfo* ni) {
@@ -1485,7 +1589,7 @@ struct ShaderNodeBackend : INodeGraphBackend
 		for (auto& pkg : g_project.m_packages) {
 			pkg->deletePass(pass);
 		}		
-	}
+	}*/
 };
 
 
@@ -1636,13 +1740,18 @@ int CALLBACK WinMain(
 				doPassUi(*g_editedPass);
 				ImGui::End();
 			} else if (g_project.m_packages.size() > 0) {
-				static ShaderNodeBackend nodeBackend;
-				nodeBackend.triggeredNode = nullptr;
-				nodeBackend.shaderPackage = g_project.m_packages[0];
-				nodeGraph(&nodeBackend);
-				if (nodeBackend.triggeredNode != nullptr) {
-					g_editedPass = ShaderNodeBackend::getPass(nodeBackend.triggeredNode);
-				}
+				//nodeBackend.triggeredNode = nullptr;
+				//nodeBackend.shaderPackage = g_project.m_packages[0];
+				static NodeGraphGuiInfoProvider guiInfoProvider;
+				Package& package = *g_project.m_packages[0];
+				package.updateGraph();
+				guiInfoProvider.updateInfoFromPackage(package);
+				nodeGraph(package.graph, guiInfoProvider);
+
+				// TODO
+				//if (nodeBackend.triggeredNode != nullptr) {
+				//	g_editedPass = ShaderNodeBackend::getPass(nodeBackend.triggeredNode);
+				//}
 			}
 
 			ImGui::End();
