@@ -88,8 +88,6 @@ namespace nodegraph {
 		std::vector<Link> links;
 		std::vector<Node> nodes;
 
-		//std::vector<port_idx> livePorts;
-		//std::vector<link_idx> liveLinks;
 		node_idx firstLiveNode = invalid_node_idx;
 
 		std::vector<port_handle> deadPorts;
@@ -196,22 +194,6 @@ namespace nodegraph {
 			addLink(desc.srcPort.idx, desc.dstPort.idx);
 		}
 
-		// Data is still at [from], and we move it to [to]
-		/*void moveLinkIdx(link_idx from, link_idx to)
-		{
-			Link& link = links[from];
-			if (link.nextInSrcPort != -1) links[link.nextInSrcPort].prevInSrcPort = to;
-			if (link.prevInSrcPort != -1) {
-				links[link.prevInSrcPort].nextInSrcPort = to;
-			}
-			else {
-				// Update head
-				ports[link.srcPort].link = to;
-			}
-
-			links[to] = links[from];
-		}*/
-
 		void removeLink(link_idx idx)
 		{
 			Link& link = links[idx];
@@ -226,31 +208,7 @@ namespace nodegraph {
 			ports[link.dstPort].link = invalid_link_idx;
 
 			deadLinks.push_back({ idx, links[idx].fingerprint });
-
-			/*// Move another item in this one's place
-			if (idx != links.size() - 1) {
-				moveLinkIdx(links.size() - 1, idx);
-			}
-
-			links.pop_back();*/
 		}
-
-		// Data is still at [from], and we move it to [to]
-		/*void movePortIdx(port_idx from, port_idx to)
-		{
-			Port& port = ports[from];
-			if (port.nextInNode != -1) ports[port.nextInNode].prevInNode = to;
-			if (port.prevInNode != -1) {
-				ports[port.prevInNode].nextInNode = to;
-			} else {
-				// Update head
-				auto& node = nodes[port.node];
-				if (node.firstInputPort == from) node.firstInputPort = to;
-				else if (node.firstOutputPort == from) node.firstOutputPort = to;
-			}
-
-			ports[to] = ports[from];
-		}*/
 
 		void removePort(port_idx idx)
 		{
@@ -269,13 +227,6 @@ namespace nodegraph {
 				if (node.firstInputPort == idx) node.firstInputPort = port.nextInNode;
 				else if (node.firstOutputPort == idx) node.firstOutputPort = port.nextInNode;
 			}
-
-			/*// Move another item in this one's place
-			if (idx != ports.size() - 1) {
-				movePortIdx(ports.size() - 1, idx);
-			}
-
-			ports.pop_back();*/
 
 			deadPorts.push_back({ idx, ports[idx].fingerprint });
 		}
@@ -477,10 +428,12 @@ struct INodeGraphBackend
 	virtual void onContextMenu(const NodeInfo*) = 0;
 };*/
 
-struct INodeGraphGuiInfoProvider {
+struct INodeGraphGuiGlue {
 	virtual std::string getNodeName(nodegraph::node_handle) const = 0;
 	virtual std::string getPortName(nodegraph::port_handle) const = 0;
+
 	virtual void onContextMenu() = 0;
+	virtual void onTriggered(nodegraph::node_handle node) = 0;
 };
 
-void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider);
+void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiGlue& infoProvider);

@@ -248,7 +248,7 @@ struct NodeGraphState
 	}
 
 	// Must be called after drawNodes
-	void updateDragging(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider, ImDrawList* const draw_list, ImVec2 offset)
+	void updateDragging(nodegraph::Graph& graph, INodeGraphGuiGlue& infoProvider, ImDrawList* const draw_list, ImVec2 offset)
 	{
 		switch (s_dragState)
 		{
@@ -551,7 +551,7 @@ struct NodeGraphState
 		);
 	}*/
 
-	void drawNodes(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider, ImDrawList* const draw_list, const ImVec2& offset)
+	void drawNodes(nodegraph::Graph& graph, INodeGraphGuiGlue& glue, ImDrawList* const draw_list, const ImVec2& offset)
 	{
 		const ImVec2 NODE_WINDOW_PADDING(12.0f, 8.0f);
 
@@ -573,7 +573,7 @@ struct NodeGraphState
 			ImGui::SetCursorScreenPos(node_rect_min + NODE_WINDOW_PADDING);
 
 			ImGui::BeginGroup();
-			ImGui::Text(infoProvider.getNodeName(nodeHandle).c_str());
+			ImGui::Text(glue.getNodeName(nodeHandle).c_str());
 			ImGui::Dummy(ImVec2(0, 5));
 
 			const float nodeHeaderMaxY = ImGui::GetCursorScreenPos().y;
@@ -585,7 +585,7 @@ struct NodeGraphState
 			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
 			{
 				ImVec2 cursorLeft = ImGui::GetCursorScreenPos();
-				ImGui::Text(infoProvider.getPortName(portHandle).c_str());
+				ImGui::Text(glue.getPortName(portHandle).c_str());
 				ports[portHandle.idx].pos = cursorLeft + ImVec2(-NODE_WINDOW_PADDING.x, 0.5f * ImGui::GetItemRectSize().y);
 			});
 			ImGui::EndGroup();
@@ -601,13 +601,13 @@ struct NodeGraphState
 			float maxWidth = 0.0f;
 			//for (const auto& x : node->outputs) {
 			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
-				maxWidth = std::max(maxWidth, ImGui::CalcTextSize(infoProvider.getPortName(portHandle).c_str()).x);
+				maxWidth = std::max(maxWidth, ImGui::CalcTextSize(glue.getPortName(portHandle).c_str()).x);
 			});
 
 			//assert(node->impl->outputPortState.size() == node->outputs.size());
 			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
 			{
-				const std::string name = infoProvider.getPortName(portHandle);
+				const std::string name = glue.getPortName(portHandle);
 				const float width = ImGui::CalcTextSize(name.c_str()).x;
 				ImGui::SetCursorPosX(cursorStart + maxWidth - width);
 				ImVec2 cursorLeft = ImGui::GetCursorScreenPos();
@@ -638,8 +638,7 @@ struct NodeGraphState
 				openContextMenu |= ImGui::IsMouseClicked(1);
 
 				if (ImGui::IsMouseDoubleClicked(0)) {
-					// TODO
-					//backend->onTriggered(node);
+					glue.onTriggered(nodeHandle);
 				}
 			}
 			bool node_moving_active = ImGui::IsItemActive();
@@ -722,7 +721,7 @@ struct NodeGraphState
 			draw_list->AddLine(ImVec2(0.0f, y) + win_pos, ImVec2(canvas_sz.x, y) + win_pos, GRID_COLOR);
 	}
 
-	void doGui(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider)
+	void doGui(nodegraph::Graph& graph, INodeGraphGuiGlue& infoProvider)
 	{
 		openContextMenu = false;
 		nodeHoveredInScene = nodegraph::node_handle();
@@ -809,7 +808,7 @@ static std::unordered_map<ImGuiID, NodeGraphState> g_nodeGraphs;
 // Really dumb data structure provided for the example.
 // Note that we storing links are INDICES (not ID) to make example code shorter, obviously a bad idea for any general purpose code.
 //void nodeGraph(INodeGraphBackend *const backend)
-void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiInfoProvider& infoProvider)
+void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiGlue& infoProvider)
 {
 	const ImGuiID id = ImGui::GetID(&graph);
 	g_nodeGraphs[id].doGui(graph, infoProvider);

@@ -24,7 +24,7 @@
 #include <shellapi.h>
 
 struct Pass;
-Pass* g_editedPass = nullptr;
+std::shared_ptr<Pass> g_editedPass = nullptr;
 
 using std::vector;
 using std::shared_ptr;
@@ -1409,16 +1409,18 @@ void APIENTRY openGLDebugCallback(
 	}
 }
 
-struct NodeGraphGuiInfoProvider : INodeGraphGuiInfoProvider
+struct NodeGraphGuiGlue : INodeGraphGuiGlue
 {
 	std::vector<std::string> nodeNames;
 	std::vector<std::string> portNames;
+	nodegraph::node_handle triggeredNode;
 
 	void updateInfoFromPackage(Package& package)
 	{
 		nodegraph::Graph& graph = package.graph;
 		nodeNames.resize(graph.nodes.size());
 		portNames.resize(graph.ports.size());
+		triggeredNode = nodegraph::node_handle();
 
 		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
 		{
@@ -1481,9 +1483,11 @@ struct NodeGraphGuiInfoProvider : INodeGraphGuiInfoProvider
 		g_project.handleFileDrop("data/" + shaderFile + ".glsl");
 	}
 
+	void onTriggered(nodegraph::node_handle node) override {
+		triggeredNode = node;
+	}
 
 	/*shared_ptr<Package> shaderPackage = nullptr;
-	const NodeInfo* triggeredNode = nullptr;
 
 	static Pass* getPass(const NodeInfo* ni) {
 		return reinterpret_cast<Pass*>(size_t(ni) - ptrdiff_t(&((Pass*)nullptr)->m_nodeInfo));
@@ -1577,10 +1581,6 @@ struct NodeGraphGuiInfoProvider : INodeGraphGuiInfoProvider
 		//p1->value.textureValue.texture = p0->value.textureValue.texture;
 
 		return true;
-	}
-
-	void onTriggered(const NodeInfo* node) override {
-		triggeredNode = node;
 	}
 
 	void onDeleted(const NodeInfo* node) override {
@@ -1742,16 +1742,15 @@ int CALLBACK WinMain(
 			} else if (g_project.m_packages.size() > 0) {
 				//nodeBackend.triggeredNode = nullptr;
 				//nodeBackend.shaderPackage = g_project.m_packages[0];
-				static NodeGraphGuiInfoProvider guiInfoProvider;
+				static NodeGraphGuiGlue guiGlue;
 				Package& package = *g_project.m_packages[0];
 				package.updateGraph();
-				guiInfoProvider.updateInfoFromPackage(package);
-				nodeGraph(package.graph, guiInfoProvider);
+				guiGlue.updateInfoFromPackage(package);
+				nodeGraph(package.graph, guiGlue);
 
-				// TODO
-				//if (nodeBackend.triggeredNode != nullptr) {
-				//	g_editedPass = ShaderNodeBackend::getPass(nodeBackend.triggeredNode);
-				//}
+				if (guiGlue.triggeredNode.valid()) {
+					g_editedPass = package.m_passes[guiGlue.triggeredNode.idx];
+				}
 			}
 
 			ImGui::End();
