@@ -41,6 +41,9 @@ namespace nodegraph {
 		bool operator==(const handle& other) const {
 			return idx == other.idx && fingerprint == other.fingerprint;
 		}
+		bool operator!=(const handle& other) const {
+			return !(*this == other);
+		}
 	};
 
 	typedef handle<port_idx> port_handle;
@@ -48,8 +51,8 @@ namespace nodegraph {
 	typedef handle<node_idx> node_handle;
 
 	struct Port {
-		port_uid uid;
-		node_idx node;
+		port_uid uid = 0;
+		node_idx node = invalid_node_idx;
 		link_idx link = invalid_link_idx;
 		port_idx nextInNode = invalid_port_idx;
 		port_idx prevInNode = invalid_port_idx;
@@ -57,8 +60,8 @@ namespace nodegraph {
 	};
 
 	struct Link {
-		port_idx srcPort;
-		port_idx dstPort;
+		port_idx srcPort = invalid_port_idx;
+		port_idx dstPort = invalid_port_idx;
 		link_idx nextInSrcPort = invalid_link_idx;
 		link_idx prevInSrcPort = invalid_link_idx;
 		u16 fingerprint = 0;
@@ -96,8 +99,13 @@ namespace nodegraph {
 
 		template <typename Fn>
 		void iterLiveNodes(Fn fn) const {
-			for (node_idx it = firstLiveNode; it != invalid_node_idx; it = nodes[it].nextNode) {
+			node_idx next;
+			for (node_idx it = firstLiveNode; it != invalid_node_idx; it = next) {
+				next = nodes[it].nextNode;
 				fn(node_handle(it, nodes[it].fingerprint));
+
+				// Removal of the same element is not supported during iteration
+				assert(next == nodes[it].nextNode);
 			}
 		}
 
@@ -106,8 +114,13 @@ namespace nodegraph {
 			const Node& node = nodes[nodeHandle.idx];
 			assert(node.fingerprint == nodeHandle.fingerprint);
 
-			for (port_idx it = node.firstInputPort; it != invalid_port_idx; it = ports[it].nextInNode) {
+			port_idx next;
+			for (port_idx it = node.firstInputPort; it != invalid_port_idx; it = next) {
+				next = ports[it].nextInNode;
 				fn(port_handle(it, ports[it].fingerprint));
+
+				// Removal of the same element is not supported during iteration
+				assert(next == ports[it].nextInNode);
 			}
 		}
 
@@ -116,8 +129,28 @@ namespace nodegraph {
 			const Node& node = nodes[nodeHandle.idx];
 			assert(node.fingerprint == nodeHandle.fingerprint);
 
-			for (port_idx it = node.firstOutputPort; it != invalid_port_idx; it = ports[it].nextInNode) {
+			port_idx next;
+			for (port_idx it = node.firstOutputPort; it != invalid_port_idx; it = next) {
+				next = ports[it].nextInNode;
 				fn(port_handle(it, ports[it].fingerprint));
+
+				// Removal of the same element is not supported during iteration
+				assert(next == ports[it].nextInNode);
+			}
+		}
+
+		template <typename Fn>
+		void iterOutputPortLinks(port_handle portHandle, Fn fn) const {
+			const Port& port = ports[portHandle.idx];
+			assert(port.fingerprint == portHandle.fingerprint);
+
+			link_idx next;
+			for (link_idx it = port.link; it != invalid_link_idx; it = next) {
+				next = links[it].nextInSrcPort;
+				fn(link_handle(it, links[it].fingerprint));
+
+				// Removal of the same element is not supported during iteration
+				assert(next == links[it].nextInSrcPort);
 			}
 		}
 
@@ -206,8 +239,8 @@ namespace nodegraph {
 			}
 
 			ports[link.dstPort].link = invalid_link_idx;
-
 			deadLinks.push_back({ idx, links[idx].fingerprint });
+			links[idx] = Link();
 		}
 
 		void removePort(port_idx idx)
@@ -229,9 +262,10 @@ namespace nodegraph {
 			}
 
 			deadPorts.push_back({ idx, ports[idx].fingerprint });
+			ports[idx] = Port();
 		}
 
-		void removeMissingInputPorts(Node& node, NodeDesc& desc)
+		void removeUnreferencedInputPorts(Node& node, NodeDesc& desc)
 		{
 			port_idx lastInputPort = node.firstInputPort;
 			if (lastInputPort != invalid_port_idx) {
@@ -244,24 +278,26 @@ namespace nodegraph {
 
 				// Iterate backwards, removing items missing from the new desc
 				for (port_idx it = lastInputPort; it != invalid_port_idx; it = ports[it].prevInNode) {
-					bool found = false;
-					auto portUid = ports[it].uid;
+					if (ports[it].link == invalid_link_idx) {
+						bool found = false;
+						auto portUid = ports[it].uid;
 
-					for (auto& d : desc.inputs) {
-						if (d == portUid) {
-							found = true;
-							break;
+						for (auto& d : desc.inputs) {
+							if (d == portUid) {
+								found = true;
+								break;
+							}
 						}
-					}
 
-					if (!found) {
-						removePort(it);
+						if (!found) {
+							removePort(it);
+						}
 					}
 				}
 			}
 		}
 
-		void removeMissingOutputPorts(Node& node, NodeDesc& desc)
+		void removeUnreferencedOutputPorts(Node& node, NodeDesc& desc)
 		{
 			port_idx lastOutputPort = node.firstOutputPort;
 			if (lastOutputPort != invalid_port_idx) {
@@ -274,18 +310,20 @@ namespace nodegraph {
 
 				// Iterate backwards, removing items missing from the new desc
 				for (port_idx it = lastOutputPort; it != invalid_port_idx; it = ports[it].prevInNode) {
-					bool found = false;
-					auto portUid = ports[it].uid;
+					if (ports[it].link == invalid_link_idx) {
+						bool found = false;
+						auto portUid = ports[it].uid;
 
-					for (auto& d : desc.outputs) {
-						if (d == portUid) {
-							found = true;
-							break;
+						for (auto& d : desc.outputs) {
+							if (d == portUid) {
+								found = true;
+								break;
+							}
 						}
-					}
 
-					if (!found) {
-						removePort(it);
+						if (!found) {
+							removePort(it);
+						}
 					}
 				}
 			}
@@ -337,8 +375,8 @@ namespace nodegraph {
 		{
 			Node& node = nodes[h.idx];
 			assert(node.fingerprint == h.fingerprint);
-			removeMissingInputPorts(node, desc);
-			removeMissingOutputPorts(node, desc);
+			removeUnreferencedInputPorts(node, desc);
+			removeUnreferencedOutputPorts(node, desc);
 			addMissingInputPorts(node, desc);
 			addMissingOutputPorts(node, desc);
 		}
@@ -385,6 +423,16 @@ namespace nodegraph {
 
 			return { idx, nodes[idx].fingerprint };
 		}
+
+		void removePort(port_handle portHandle)
+		{
+			assert(ports[portHandle.idx].fingerprint == portHandle.fingerprint);
+			removePort(portHandle.idx);
+		}
+
+		port_handle portHandle(port_idx idx) {
+			return port_handle(idx, ports[idx].fingerprint);
+		}
 	};
 }
 
@@ -430,7 +478,13 @@ struct INodeGraphBackend
 
 struct INodeGraphGuiGlue {
 	virtual std::string getNodeName(nodegraph::node_handle) const = 0;
-	virtual std::string getPortName(nodegraph::port_handle) const = 0;
+
+	struct PortInfo {
+		std::string name;
+		bool valid;
+	};
+
+	virtual PortInfo getPortInfo(nodegraph::port_handle) const = 0;
 
 	virtual void onContextMenu() = 0;
 	virtual void onTriggered(nodegraph::node_handle node) = 0;

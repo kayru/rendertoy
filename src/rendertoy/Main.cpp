@@ -715,7 +715,7 @@ struct ComputeShader
 struct ShaderParamProxy {
 	const ShaderParamBindingRefl& refl;
 	ShaderParamValue& value;
-	const u64 uid;
+	const u32 uid;
 
 	ShaderParamProxy* operator*() {
 		return this;
@@ -730,7 +730,7 @@ struct ShaderParamIterProxy {
 	ShaderParamIterProxy(
 		const std::vector<ShaderParamBindingRefl>& refls,
 		std::vector<ShaderParamValue>& values,
-		const std::vector<u64>& uids)
+		const std::vector<u32>& uids)
 		: refls(refls)
 		, values(values)
 		, uids(uids)
@@ -778,7 +778,7 @@ struct ShaderParamIterProxy {
 	private:
 		const ShaderParamBindingRefl* refls;
 		ShaderParamValue* values;
-		const u64* uids;
+		const u32* uids;
 		size_t i;
 	};
 
@@ -789,7 +789,7 @@ struct ShaderParamIterProxy {
 private:
 	const std::vector<ShaderParamBindingRefl>& refls;
 	std::vector<ShaderParamValue>& values;
-	const std::vector<u64>& uids;
+	const std::vector<u32>& uids;
 };
 
 struct Pass
@@ -818,19 +818,19 @@ struct Pass
 	nodegraph::node_handle m_nodeHandle;
 
 private:
-	u64 nextParamUid() {
-		static u64 i = 0;
+	u32 nextParamUid() {
+		static u32 i = 0;
 		return ++i;
 	}
 
 	void updateParams() {
 		std::vector<ShaderParamValue> newValues(m_computeShader.m_params.size());
-		std::vector<u64> newUids(m_computeShader.m_params.size());
+		std::vector<u32> newUids(m_computeShader.m_params.size());
 
 		for (size_t i = 0; i < newValues.size(); ++i) {
 			ShaderParamBindingRefl& newRefl = m_computeShader.m_params[i];
 			ShaderParamValue& newValue = newValues[i];
-			u64& newUid = newUids[i];
+			u32& newUid = newUids[i];
 
 			auto curMatch = std::find_if(m_paramRefl.begin(), m_paramRefl.end(), [&](auto& p) { return p.name == newRefl.name; });
 			if (curMatch != m_paramRefl.end()) {
@@ -856,9 +856,11 @@ private:
 					if (prevMatch->refl.type == newRefl.type) {
 						// Type matches, let's go with it
 						newValue = prevMatch->value;
+						newUid = prevMatch->uid;
 					} else {
 						// Otherwise we have found an old param, but its type is now different. Use the default.
 						newValue = m_computeShader.m_params[i].defaultValue();
+						newUid = nextParamUid();
 					}
 
 					// Drop the old param
@@ -866,9 +868,8 @@ private:
 				} else {
 					// No match found anywhere. Just go with the default.
 					newValue = m_computeShader.m_params[i].defaultValue();
+					newUid = nextParamUid();
 				}
-
-				newUid = nextParamUid();
 			}
 		}
 
@@ -882,7 +883,7 @@ private:
 		// go to the m_prevParams array, so that we can restore old values upon further shader modifications.
 		for (size_t i = 0; i < m_paramRefl.size(); ++i) {
 			if (!m_paramRefl[i].name.empty()) {
-				m_prevParams.push_back({ m_paramRefl[i], m_paramValues[i] });
+				m_prevParams.push_back({ m_paramRefl[i], m_paramValues[i], m_paramUids[i] });
 			}
 		}
 
@@ -897,16 +898,27 @@ private:
 
 	ComputeShader m_computeShader;
 	std::vector<ShaderParamValue> m_paramValues;
-	std::vector<u64> m_paramUids;
+	std::vector<u32> m_paramUids;
 
 	// Kept around for preserving previous values across shader reload and shader modifications
 	std::vector<ShaderParamRefl> m_paramRefl;
 	struct PrevShaderParam {
 		ShaderParamRefl refl;
 		ShaderParamValue value;
+		u32 uid;
 	};
 	std::vector<PrevShaderParam> m_prevParams;
 };
+
+bool needsOutputPort(const ShaderParamProxy& param)
+{
+	return param.refl.type == ShaderParamType::Image2d && param.value.textureValue.source == TextureDesc::Source::Create;
+}
+
+bool needsInputPort(const ShaderParamProxy& param)
+{
+	return param.refl.type == ShaderParamType::Image2d && param.value.textureValue.source == TextureDesc::Source::Input;
+}
 
 struct Package
 {
@@ -923,13 +935,10 @@ struct Package
 		desc->outputs.clear();
 
 		for (auto& p : pass.params()) {
-			if (p.refl.type == ShaderParamType::Image2d) {
-				if (TextureDesc::Source::Create == p.value.textureValue.source) {
-					desc->outputs.push_back(p.uid);
-				}
-				else if (TextureDesc::Source::Input == p.value.textureValue.source) {
-					desc->inputs.push_back(p.uid);
-				}
+			if (needsInputPort(p)) {
+				desc->inputs.push_back(p.uid);
+			} else if (needsOutputPort(p)) {
+				desc->outputs.push_back(p.uid);
 			}
 		}
 	}
@@ -1412,14 +1421,14 @@ void APIENTRY openGLDebugCallback(
 struct NodeGraphGuiGlue : INodeGraphGuiGlue
 {
 	std::vector<std::string> nodeNames;
-	std::vector<std::string> portNames;
+	std::vector<PortInfo> portInfo;
 	nodegraph::node_handle triggeredNode;
 
 	void updateInfoFromPackage(Package& package)
 	{
 		nodegraph::Graph& graph = package.graph;
 		nodeNames.resize(graph.nodes.size());
-		portNames.resize(graph.ports.size());
+		portInfo.resize(graph.ports.size());
 		triggeredNode = nodegraph::node_handle();
 
 		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
@@ -1429,18 +1438,38 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 
 			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
 				const nodegraph::Port& port = graph.ports[portHandle.idx];
-				portNames[portHandle.idx] =
-					std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
-						return param.uid == port.uid;
-					})->refl.name;
+				auto param = std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
+					return param.uid == port.uid;
+				});
+
+				if (param != pass.params().end()) {
+					if (needsInputPort(*param)) {
+						portInfo[portHandle.idx] = PortInfo{ param->refl.name, true };
+					} else {
+						// This parameter should not be exposed anymore
+						graph.removePort(portHandle);
+					}
+				} else {
+					portInfo[portHandle.idx].valid = false;
+				}
 			});
 
 			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
 				const nodegraph::Port& port = graph.ports[portHandle.idx];
-				portNames[portHandle.idx] =
-					std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
+				auto param = std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
 					return param.uid == port.uid;
-				})->refl.name;
+				});
+				if (param != pass.params().end()) {
+					if (needsOutputPort(*param)) {
+						portInfo[portHandle.idx] = PortInfo{ param->refl.name, true };
+					}
+					else {
+						// This parameter should not be exposed anymore
+						graph.removePort(portHandle);
+					}
+				} else {
+					portInfo[portHandle.idx].valid = false;
+				}
 			});
 		});
 	}
@@ -1450,9 +1479,9 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 		return nodeNames[h.idx];
 	}
 	
-	std::string getPortName(nodegraph::port_handle h) const override
+	PortInfo getPortInfo(nodegraph::port_handle h) const override
 	{
-		return portNames[h.idx];
+		return portInfo[h.idx];
 	}
 
 	void onContextMenu() override
