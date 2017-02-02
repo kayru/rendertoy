@@ -79,10 +79,7 @@ namespace nodegraph {
 	};
 
 	struct LinkDesc {
-		node_handle srcNode;
 		port_handle srcPort;
-
-		node_handle dstNode;
 		port_handle dstPort;
 	};
 
@@ -164,12 +161,12 @@ namespace nodegraph {
 			node.firstOutputPort = port;
 		}
 
-		void addLink(node_idx srcNode, port_idx srcPort, node_idx dstNode, port_idx dstPort)
+		void addLink(port_idx srcPort, port_idx dstPort)
 		{
 			// Input ports can only have one link
-			assert(ports[dstPort].link == invalid_link_idx);
-			assert(ports[srcPort].node == srcNode);
-			assert(ports[dstPort].node == dstNode);
+			if (ports[dstPort].link != invalid_link_idx) {
+				removeLink(ports[dstPort].link);
+			}
 
 			link_idx idx;
 			if (deadLinks.size() > 0) {
@@ -196,7 +193,7 @@ namespace nodegraph {
 
 		void addLink(const LinkDesc& desc)
 		{
-			addLink(desc.srcNode.idx, desc.srcPort.idx, desc.dstNode.idx, desc.dstPort.idx);
+			addLink(desc.srcPort.idx, desc.dstPort.idx);
 		}
 
 		// Data is still at [from], and we move it to [to]

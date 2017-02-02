@@ -290,10 +290,10 @@ struct NodeGraphState
 				{
 					nodegraph::LinkDesc li;
 					if (s_dragNode.isOutput) {
-						li = { dragNode, s_dragNode.port, conNode, con.port };
+						li = { s_dragNode.port, con.port };
 					}
 					else {
-						li = { conNode, con.port, dragNode, s_dragNode.port };
+						li = { con.port, s_dragNode.port };
 					}
 
 					drawList->ChannelsSetCurrent(2);
