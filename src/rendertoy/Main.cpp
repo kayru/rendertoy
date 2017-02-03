@@ -1434,7 +1434,10 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
 		{
 			Pass& pass = *package.m_passes[nodeHandle.idx];
-			nodeNames[nodeHandle.idx] = pass.shader().m_sourceFile;
+			{
+				std::string filename = fs::path(pass.shader().m_sourceFile).filename().string();
+				nodeNames[nodeHandle.idx] = filename.substr(0, filename.find_last_of("."));
+			}
 
 			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
 				const nodegraph::Port& port = graph.ports[portHandle.idx];
@@ -1516,87 +1519,14 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 		triggeredNode = node;
 	}
 
-	/*shared_ptr<Package> shaderPackage = nullptr;
-
-	static Pass* getPass(const NodeInfo* ni) {
-		return reinterpret_cast<Pass*>(size_t(ni) - ptrdiff_t(&((Pass*)nullptr)->m_nodeInfo));
+	void onNodeRemoved(nodegraph::node_handle node) override {
+		// HACK
+		Package& package = *g_project.m_packages[0];
+		Pass* pass = package.m_passes[node.idx].get();
+		package.deletePass(pass);
 	}
 
-	size_t getNodeCount() override
-	{
-		return shaderPackage->m_passes.size();
-	}
-
-	virtual NodeInfo* getNodeByIdx(size_t idx) override
-	{
-		Pass& pass = *shaderPackage->m_passes[idx];
-		NodeInfo& ni = pass.m_nodeInfo;
-		{
-			std::string filename = fs::path(pass.shader().m_sourceFile).filename().string();
-			ni.name = filename.substr(0, filename.find_last_of("."));
-		}
-
-		ni.inputs.clear();
-		ni.outputs.clear();
-
-		for (auto& p : pass.params()) {
-			if (p.refl.type == ShaderParamType::Image2d) {
-				if (TextureDesc::Source::Create == p.value.textureValue.source) {
-					ni.outputs.push_back({ p.uid, p.refl.name });
-				} else if (TextureDesc::Source::Input == p.value.textureValue.source) {
-					ni.inputs.push_back({ p.uid, p.refl.name });
-				}
-			}
-		}
-
-		return &ni;
-	}
-
-	void onContextMenu(const NodeInfo* node) override
-	{
-		if (node)
-		{
-			ImGui::Text("Node '%s'", node->name.data);
-			ImGui::Separator();
-			if (ImGui::MenuItem("Rename..", NULL, false, false)) {}
-			if (ImGui::MenuItem("Delete", NULL, false, false)) {}
-			if (ImGui::MenuItem("Copy", NULL, false, false)) {}
-		}
-		else
-		{
-			//if (ImGui::MenuItem("Add")) { nodes.push_back(Node(nodes.Size, "New node", scene_pos, 0.5f, ImColor(100,100,200), 2, 2)); }
-			//if (ImGui::MenuItem("Paste", NULL, false, false)) {}
-			std::vector<std::string> items;
-			getGlobalContextMenuItems(&items);
-
-			for (std::string& it : items) {
-				if (ImGui::MenuItem(it.c_str(), NULL, false, true)) {
-					onGlobalContextMenuSelected(it);
-				}
-			}
-		}
-	}
-
-	void getGlobalContextMenuItems(std::vector<std::string> *const items)
-	{
-		std::vector<fs::path> files;
-		getFilesMatchingExtension("data", ".glsl", files);
-
-		for (const fs::path& f : files) {
-			std::string filename = f.filename().string();
-			items->push_back(filename.substr(0, filename.find_last_of(".")));
-		}
-	}
-
-	void onGlobalContextMenuSelected(const std::string& shaderFile)
-	{
-		g_project.handleFileDrop("data/" + shaderFile + ".glsl");
-	}
-
-	// Called once to initialize connections
-	//void getLinks(std::vector<LinkInfo> *const) override {}
-
-	bool canConnect(const LinkInfo& l) override {
+	/*bool canConnect(const LinkInfo& l) override {
 		Pass& src = *getPass(l.srcNode);
 		Pass& dst = *getPass(l.dstNode);
 
@@ -1610,14 +1540,6 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 		//p1->value.textureValue.texture = p0->value.textureValue.texture;
 
 		return true;
-	}
-
-	void onDeleted(const NodeInfo* node) override {
-		// HACK
-		Pass* pass = getPass(node);
-		for (auto& pkg : g_project.m_packages) {
-			pkg->deletePass(pass);
-		}		
 	}*/
 };
 

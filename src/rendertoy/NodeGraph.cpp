@@ -591,6 +591,7 @@ struct NodeGraphState
 
 		const ImGuiIO& io = ImGui::GetIO();
 		if (nodeSelected.valid() && ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
+			glue.onNodeRemoved(nodeSelected);
 			graph.removeNode(nodeSelected);
 			nodeSelected = nodegraph::node_handle();
 		}
