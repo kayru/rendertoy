@@ -4,14 +4,7 @@
 #include <vector>
 #include <cassert>
 
-/*struct FixedString {
-	char data[64] = { 0 };
-	FixedString() {}
-	FixedString(const char* const n) { *this = n; };
-	FixedString(const std::string& n) { *this = n; };
-	FixedString& operator=(const char* const n);
-	FixedString& operator=(const std::string& n);
-};*/
+
 
 namespace nodegraph {
 	typedef u32 port_uid;
@@ -265,6 +258,33 @@ namespace nodegraph {
 			ports[idx] = Port();
 		}
 
+		void removeNode(node_handle nodeHandle)
+		{
+			Node& node = nodes[nodeHandle.idx];
+		
+			while (node.firstInputPort != invalid_port_idx) {
+				removePort(node.firstInputPort);
+			}
+
+			while (node.firstOutputPort != invalid_port_idx) {
+				removePort(node.firstOutputPort);
+			}
+
+			if (node.nextNode != invalid_node_idx) nodes[node.nextNode].prevNode = node.prevNode;
+			if (node.prevNode != invalid_port_idx) {
+				nodes[node.prevNode].nextNode = node.nextNode;
+			}
+			else {
+				// Update head
+				if (firstLiveNode == nodeHandle.idx) {
+					firstLiveNode = node.nextNode;
+				}
+			}
+
+			deadNodes.push_back({ nodeHandle.idx, node.fingerprint });
+			nodes[nodeHandle.idx] = Node();
+		}
+
 		void removeUnreferencedInputPorts(Node& node, NodeDesc& desc)
 		{
 			port_idx lastInputPort = node.firstInputPort;
@@ -436,45 +456,6 @@ namespace nodegraph {
 	};
 }
 
-
-/*struct NodeImpl;
-
-struct PortInfo
-{
-	size_t id;
-	FixedString name;
-};
-
-struct NodeInfo;
-struct LinkInfo {
-	NodeInfo* srcNode;
-	NodeInfo* dstNode;
-	size_t srcPort;
-	size_t dstPort;
-};
-
-struct NodeInfo
-{
-	FixedString name;
-	std::vector<PortInfo> inputs;
-	std::vector<PortInfo> outputs;
-	NodeImpl* impl = nullptr;
-
-	void getLinks(std::vector<LinkInfo> *const);
-};
-
-struct INodeGraphBackend
-{
-	// Called every frame
-	virtual size_t getNodeCount() = 0;
-	virtual NodeInfo* getNodeByIdx(size_t idx) = 0;
-
-	// Called by the graph editor upon various actions
-	virtual bool canConnect(const LinkInfo&) = 0;
-	virtual void onTriggered(const NodeInfo*) = 0;
-	virtual void onDeleted(const NodeInfo*) = 0;
-	virtual void onContextMenu(const NodeInfo*) = 0;
-};*/
 
 struct INodeGraphGuiGlue {
 	virtual std::string getNodeName(nodegraph::node_handle) const = 0;
