@@ -135,7 +135,7 @@ struct NodeGraphState
 		const ImVec2 mousePos = ImGui::GetIO().MousePos;
 		Connector result;
 
-		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
 			const nodegraph::Node& node = graph.nodes[nodeHandle.idx];
 
@@ -357,7 +357,7 @@ struct NodeGraphState
 		}
 
 		// Display nodes
-		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
 			NodeState& node = nodes[nodeHandle.idx];
 			ImGui::PushID(nodeHandle.idx);
@@ -487,7 +487,7 @@ struct NodeGraphState
 		// Display links
 		drawList->ChannelsSetCurrent(1); // Background
 
-		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
 			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle)
 			{
@@ -549,7 +549,7 @@ struct NodeGraphState
 		ports.resize(graph.ports.size());
 
 		// TODO: spawning of multiple nodes with offsets
-		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
 			if (nodes[nodeHandle.idx].Size.x == 0) {
 				const ImVec2 mousePos = ImGui::GetIO().MousePos + scrolling - this->originOffset;

@@ -91,7 +91,7 @@ namespace nodegraph {
 		std::vector<node_handle> deadNodes;
 
 		template <typename Fn>
-		void iterLiveNodes(Fn fn) const {
+		void iterNodes(Fn fn) const {
 			node_idx next;
 			for (node_idx it = firstLiveNode; it != invalid_node_idx; it = next) {
 				next = nodes[it].nextNode;
@@ -103,9 +103,8 @@ namespace nodegraph {
 		}
 
 		template <typename Fn>
-		void iterNodeInputPorts(node_handle nodeHandle, Fn fn) const {
-			const Node& node = nodes[nodeHandle.idx];
-			assert(node.fingerprint == nodeHandle.fingerprint);
+		void iterNodeInputPorts(node_idx nodeIdx, Fn fn) const {
+			const Node& node = nodes[nodeIdx];
 
 			port_idx next;
 			for (port_idx it = node.firstInputPort; it != invalid_port_idx; it = next) {
@@ -115,6 +114,14 @@ namespace nodegraph {
 				// Removal of the same element is not supported during iteration
 				assert(next == ports[it].nextInNode);
 			}
+		}
+
+		template <typename Fn>
+		void iterNodeInputPorts(node_handle nodeHandle, Fn fn) const {
+			const Node& node = nodes[nodeHandle.idx];
+			assert(node.fingerprint == nodeHandle.fingerprint);
+
+			iterNodeInputPorts(nodeHandle.idx, fn);
 		}
 
 		template <typename Fn>
@@ -145,6 +152,21 @@ namespace nodegraph {
 				// Removal of the same element is not supported during iteration
 				assert(next == links[it].nextInSrcPort);
 			}
+		}
+
+		template <typename Fn>
+		void iterNodeIncidentLinks(node_idx nodeIdx, Fn fn) const {
+			iterNodeInputPorts(nodeIdx, [&](nodegraph::port_handle portHandle) {
+				const Port& dstPort = ports[portHandle.idx];
+				if (dstPort.link != invalid_link_idx) {
+					fn(link_handle(dstPort.link, links[dstPort.link].fingerprint));
+				}
+			});
+		}
+
+		template <typename Fn>
+		void iterNodeIncidentLinks(node_handle nodeHandle, Fn fn) const {
+			iterNodeIncidentLinks(nodeHandle.idx, fn);
 		}
 
 		node_handle getPortNode(port_handle portHandle) const {

@@ -127,15 +127,25 @@ std::vector<char> loadShaderSource(const std::string& path, const char* preproce
 	return result;
 }
 
+struct TextureKey {
+	u32 width;
+	u32 height;
+	GLenum format;
+
+	bool operator==(const TextureKey& other) const {
+		return width == other.width && height == other.height && format == other.format;
+	}
+};
+
+
 struct CreatedTexture {
-	GLuint texId = -1;
-	GLuint samplerId = -1;
-	int width = 0;
-	int height = 0;
+	GLuint texId = 0;
+	GLuint samplerId = 0;
+	TextureKey key;
 
 	~CreatedTexture() {
-		if (texId != -1) glDeleteTextures(1, &texId);
-		if (samplerId != -1) glDeleteSamplers(1, &samplerId);
+		if (texId != 0) glDeleteTextures(1, &texId);
+		if (samplerId != 0) glDeleteSamplers(1, &samplerId);
 	}
 };
 
@@ -152,39 +162,61 @@ struct TextureDesc {
 	bool wrapT = true;
 };
 
-struct TextureAsset : TextureDesc {
-	bool transientCreated = false;
-	shared_ptr<CreatedTexture> texture;
-};
+shared_ptr<CreatedTexture> createTexture(const TextureDesc& desc, const TextureKey& key)
+{
+	GLuint tex1;
+	glGenTextures(1, &tex1);
+	glBindTexture(GL_TEXTURE_2D, tex1);
+	glTexStorage2D(GL_TEXTURE_2D, 1u, GL_RGBA16F, key.width, key.height);
 
-void loadTexture(TextureAsset& asset) {
-	asset.texture = nullptr;
+	GLuint samplerId;
+	glGenSamplers(1, &samplerId);
+	glSamplerParameteri(samplerId, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+	glSamplerParameteri(samplerId, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+
+	auto tex = std::make_shared<CreatedTexture>();
+	tex->key = key;
+	tex->texId = tex1;
+	tex->samplerId = samplerId;
+	return tex;
+}
+
+std::unordered_map<std::string, shared_ptr<CreatedTexture>> g_loadedTextures;
+
+shared_ptr<CreatedTexture> loadTexture(const TextureDesc& desc) {
+	{
+		auto found = g_loadedTextures.find(desc.path);
+		if (found != g_loadedTextures.end()) {
+			return found->second;
+		}
+	}
+
 	int ret;
 	const char* err;
 
 	// 1. Read EXR version.
 	EXRVersion exr_version;
 
-	ret = ParseEXRVersionFromFile(&exr_version, asset.path.c_str());
+	ret = ParseEXRVersionFromFile(&exr_version, desc.path.c_str());
 	if (ret != 0) {
-		fprintf(stderr, "Invalid EXR file: %s\n", asset.path.c_str());
-		return;
+		fprintf(stderr, "Invalid EXR file: %s\n", desc.path.c_str());
+		return nullptr;
 	}
 
 	if (exr_version.multipart) {
 		// must be multipart flag is false.
 		printf("Multipart EXR not supported");
-		return;
+		return nullptr;
 	}
 
 	// 2. Read EXR header
 	EXRHeader exr_header;
 	InitEXRHeader(&exr_header);
 
-	ret = ParseEXRHeaderFromFile(&exr_header, &exr_version, asset.path.c_str(), &err);
+	ret = ParseEXRHeaderFromFile(&exr_header, &exr_version, desc.path.c_str(), &err);
 	if (ret != 0) {
 		fprintf(stderr, "Parse EXR err: %s\n", err);
-		return;
+		return nullptr;
 	}
 
 	EXRImage exr_image;
@@ -194,10 +226,10 @@ void loadTexture(TextureAsset& asset) {
 		exr_header.requested_pixel_types[i] = TINYEXR_PIXELTYPE_HALF;
 	}
 
-	ret = LoadEXRImageFromFile(&exr_image, &exr_header, asset.path.c_str(), &err);
+	ret = LoadEXRImageFromFile(&exr_image, &exr_header, desc.path.c_str(), &err);
 	if (ret != 0) {
 		fprintf(stderr, "Load EXR err: %s\n", err);
-		return;
+		return nullptr;
 	}
 
 	short* out_rgba = nullptr;
@@ -250,27 +282,16 @@ void loadTexture(TextureAsset& asset) {
 		}
 	}
 
-	GLuint tex1;
-	glGenTextures(1, &tex1);
-	glBindTexture(GL_TEXTURE_2D, tex1);
-	glTexStorage2D(GL_TEXTURE_2D, 1u, GL_RGBA16F, exr_image.width, exr_image.height);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
-	glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+	shared_ptr<CreatedTexture> res = createTexture(desc, TextureKey{ u32(exr_image.width), u32(exr_image.height), GL_RGBA16F });
+
+	glBindTexture(GL_TEXTURE_2D, res->texId);
 	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, exr_image.width, exr_image.height, GL_RGBA, GL_HALF_FLOAT, out_rgba);
-
-	GLuint samplerId;
-	glGenSamplers(1, &samplerId);
-	glSamplerParameteri(samplerId, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glSamplerParameteri(samplerId, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-	asset.texture = make_shared<CreatedTexture>();
-	asset.texture->width = exr_image.width;
-	asset.texture->height = exr_image.height;
-	asset.texture->texId = tex1;
-	asset.texture->samplerId = samplerId;
 
 	FreeEXRHeader(&exr_header);
 	FreeEXRImage(&exr_image);
+
+	g_loadedTextures[desc.path] = res;
+	return res;
 }
 
 struct ParamAnnotation
@@ -716,6 +737,7 @@ struct ShaderParamProxy {
 	const ShaderParamBindingRefl& refl;
 	ShaderParamValue& value;
 	const u32 uid;
+	const u32 idx;
 
 	ShaderParamProxy* operator*() {
 		return this;
@@ -727,13 +749,20 @@ struct ShaderParamProxy {
 };
 
 struct ShaderParamIterProxy {
+	ShaderParamIterProxy() {}
+	ShaderParamIterProxy(const ShaderParamIterProxy& other)
+		: refls(other.refls)
+		, values(other.values)
+		, uids(other.uids)
+	{}
+
 	ShaderParamIterProxy(
 		const std::vector<ShaderParamBindingRefl>& refls,
 		std::vector<ShaderParamValue>& values,
 		const std::vector<u32>& uids)
-		: refls(refls)
-		, values(values)
-		, uids(uids)
+		: refls(&refls)
+		, values(&values)
+		, uids(&uids)
 	{
 		assert(refls.size() == values.size());
 		assert(refls.size() == uids.size());
@@ -741,18 +770,18 @@ struct ShaderParamIterProxy {
 
 	struct Iterator : public std::iterator<std::forward_iterator_tag, Iterator> {
 		Iterator(ShaderParamIterProxy* cont, size_t i)
-			: refls(cont->refls.data())
-			, values(cont->values.data())
-			, uids(cont->uids.data())
+			: refls(cont->refls->data())
+			, values(cont->values->data())
+			, uids(cont->uids->data())
 			, i(i)
 		{}
 
 		ShaderParamProxy operator*() const{
-			return ShaderParamProxy { refls[i], values[i], uids[i] };
+			return ShaderParamProxy { refls[i], values[i], uids[i], u32(i) };
 		}
 
 		ShaderParamProxy operator->() const {
-			return ShaderParamProxy{ refls[i], values[i], uids[i] };
+			return ShaderParamProxy{ refls[i], values[i], uids[i], u32(i) };
 		}
 
 		bool operator==(const Iterator& other) const {
@@ -783,14 +812,159 @@ struct ShaderParamIterProxy {
 	};
 
 	Iterator begin() { return Iterator(this, 0); }
-	Iterator end() { return Iterator(this, refls.size()); }
+	Iterator end() { return Iterator(this, refls->size()); }
 
 	friend struct Iterator;
 private:
-	const std::vector<ShaderParamBindingRefl>& refls;
-	std::vector<ShaderParamValue>& values;
-	const std::vector<u32>& uids;
+	const std::vector<ShaderParamBindingRefl>* refls = nullptr;
+	std::vector<ShaderParamValue>* values = nullptr;
+	const std::vector<u32>* uids = nullptr;
 };
+
+
+namespace std {
+	template <>
+	struct hash<TextureKey>
+	{
+		std::size_t operator()(const TextureKey& k) const {
+			size_t res = 17;
+			res = res * 31u + hash<u32>()(k.width);
+			res = res * 31u + hash<u32>()(k.height);
+			res = res * 31u + hash<GLenum>()(k.format);
+			return res;
+		}
+	};
+}
+
+std::unordered_map<TextureKey, shared_ptr<CreatedTexture>> g_transientTextureCache;
+
+
+struct CompiledImage
+{
+	shared_ptr<CreatedTexture> tex;
+	bool owned = false;
+
+	bool valid() const {
+		return tex && tex->texId != 0;
+	}
+
+	void release() {
+		g_transientTextureCache[tex->key] = tex;
+		tex = nullptr;
+		owned = false;
+	}
+};
+
+
+struct CompiledPass
+{
+	std::vector<GLuint> paramLocations;
+	std::vector<CompiledImage> compiledImages;
+	ShaderParamIterProxy params;
+	ComputeShader* shader = nullptr;
+
+	void render(u32 width, u32 height)
+	{
+		glUseProgram(shader->m_programHandle);
+		u32 imgUnit = 0;
+		u32 texUnit = 0;
+
+		for (const auto& param : params) {
+			const auto& refl = param.refl;
+			const auto& value = param.value;
+
+			if (refl.type == ShaderParamType::Float) {
+				glUniform1f(refl.location, value.floatValue);
+			}
+			else if (refl.type == ShaderParamType::Float2) {
+				glUniform2f(refl.location, value.float2Value.x, value.float2Value.y);
+			}
+			else if (refl.type == ShaderParamType::Float3) {
+				glUniform3f(refl.location, value.float3Value.x, value.float3Value.y, value.float3Value.z);
+			}
+			else if (refl.type == ShaderParamType::Float4) {
+				glUniform4f(refl.location, value.float4Value.x, value.float4Value.y, value.float4Value.z, value.float4Value.w);
+			}
+			else if (refl.type == ShaderParamType::Int) {
+				glUniform1i(refl.location, value.intValue);
+			}
+			else if (refl.type == ShaderParamType::Int2) {
+				glUniform2i(refl.location, value.int2Value.x, value.int2Value.y);
+			}
+			else if (refl.type == ShaderParamType::Int3) {
+				glUniform3i(refl.location, value.int3Value.x, value.int3Value.y, value.int3Value.z);
+			}
+			else if (refl.type == ShaderParamType::Int4) {
+				glUniform4i(refl.location, value.int4Value.x, value.int4Value.y, value.int4Value.z, value.int4Value.w);
+			}
+			else if (refl.type == ShaderParamType::Image2d) {
+				CompiledImage& img = compiledImages[param.idx];
+				if (img.valid()) {
+					const GLint level = 0;
+					const GLenum layered = GL_FALSE;
+					glBindImageTexture(imgUnit, img.tex->texId, level, layered, 0, GL_READ_ONLY, GL_RGBA16F);
+					glUniform1i(refl.location, imgUnit);
+					++imgUnit;
+				}
+			}
+			else if (refl.type == ShaderParamType::Sampler2d) {
+				CompiledImage& img = compiledImages[param.idx];
+				if (img.valid()) {
+					const GLint level = 0;
+					const GLenum layered = GL_FALSE;
+					glActiveTexture(GL_TEXTURE0 + texUnit);
+					glBindTexture(GL_TEXTURE_2D, img.tex->texId);
+					glUniform1i(refl.location, texUnit);
+
+					const GLuint samplerId = img.tex->samplerId;
+					glSamplerParameteri(samplerId, GL_TEXTURE_WRAP_S, value.textureValue.wrapS ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+					glSamplerParameteri(samplerId, GL_TEXTURE_WRAP_T, value.textureValue.wrapT ? GL_REPEAT : GL_CLAMP_TO_EDGE);
+					glBindSampler(texUnit, samplerId);
+					++texUnit;
+				}
+			}
+		}
+
+		GLint workGroupSize[3];
+		glGetProgramiv(shader->m_programHandle, GL_COMPUTE_WORK_GROUP_SIZE, workGroupSize);
+		glDispatchCompute(
+			(width + workGroupSize[0] - 1) / workGroupSize[0],
+			(height + workGroupSize[1] - 1) / workGroupSize[1],
+			1);
+	}
+};
+
+shared_ptr<CreatedTexture> createTransientTexture(const TextureDesc& desc)
+{
+	TextureKey key = {
+		1280,
+		720,
+		GL_RGBA16F
+	};
+
+	auto existing = g_transientTextureCache.find(key);
+	if (existing != g_transientTextureCache.end()) {
+		auto res = existing->second;
+		g_transientTextureCache.erase(existing);
+		return res;
+	}
+	else {
+		return createTexture(desc, key);
+	}
+}
+
+
+// Create or load the image
+void compileImage(const TextureDesc& desc, CompiledImage *const compiled)
+{
+	if (desc.source == TextureDesc::Source::Create) {
+		compiled->tex = createTransientTexture(desc);
+		compiled->owned = true;
+	} else if (desc.source == TextureDesc::Source::Load) {
+		compiled->tex = loadTexture(desc);
+	}
+}
+
 
 struct Pass
 {
@@ -813,6 +987,34 @@ struct Pass
 
 	const ComputeShader& shader() const {
 		return m_computeShader;
+	}
+
+	void compile(CompiledPass *const compiled)
+	{
+		compiled->shader = &m_computeShader;
+		compiled->params = params();
+		compiled->paramLocations.resize(m_paramRefl.size());
+		compiled->compiledImages.clear();
+		compiled->compiledImages.resize(m_paramRefl.size());
+
+		for (size_t i = 0; i < m_paramRefl.size(); ++i) {
+			const GLint loc = glGetUniformLocation(m_computeShader.m_programHandle, m_paramRefl[i].name.c_str());
+			compiled->paramLocations[i] = loc;
+
+			if (m_paramRefl[i].type == ShaderParamType::Image2d) {
+				compileImage(m_paramValues[i].textureValue, &compiled->compiledImages[i]);
+			}
+		}
+	}
+
+	int findParamByPortUid(nodegraph::port_uid uid) const {
+		for (int i = 0; i < int(m_paramUids.size()); ++i) {
+			if (m_paramUids[i] == uid) {
+				return i;
+			}
+		}
+
+		return -1;
 	}
 
 	nodegraph::node_handle m_nodeHandle;
@@ -920,13 +1122,19 @@ bool needsInputPort(const ShaderParamProxy& param)
 	return param.refl.type == ShaderParamType::Image2d && param.value.textureValue.source == TextureDesc::Source::Input;
 }
 
+struct CompiledPackage
+{
+	std::vector<CompiledPass> orderedPasses;
+	shared_ptr<CreatedTexture> outputTexture;
+};
+
 struct Package
 {
 	vector<shared_ptr<Pass>> m_passes;
 	nodegraph::Graph graph;
 
-	void deletePass(Pass* p) {
-		m_passes.erase(std::remove_if(m_passes.begin(), m_passes.end(), [p](const auto& other){ return other.get() == p; }), m_passes.end());
+	void deletePass(u32 passIndex) {
+		m_passes[passIndex] = nullptr;
 	}
 
 	void getNodeDesc(Pass& pass, nodegraph::NodeDesc *const desc)
@@ -945,7 +1153,7 @@ struct Package
 
 	void updateGraph()
 	{
-		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
 			Pass& pass = *m_passes[nodeHandle.idx];
 			nodegraph::NodeDesc desc;
@@ -958,13 +1166,116 @@ struct Package
 	{
 		if (ends_with(path, ".glsl")) {
 			auto pass = make_shared<Pass>(path);
-			m_passes.emplace_back(pass);
 
 			nodegraph::NodeDesc desc;
-			getNodeDesc(*m_passes.back(), &desc);
-			graph.addNode(desc);
+			getNodeDesc(*pass, &desc);
+			nodegraph::node_handle nodeHandle = graph.addNode(desc);
 
-			//ImGui::Node* n1 = nge.addNode(0, ImVec2(200, 50));
+			if (m_passes.size() == nodeHandle.idx) {
+				m_passes.emplace_back(pass);
+			} else {
+				m_passes[nodeHandle.idx] = pass;
+			}
+		}
+	}
+
+	nodegraph::node_handle getOutputPass()
+	{
+		nodegraph::node_handle result;
+
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle) {
+			if (graph.nodes[nodeHandle.idx].firstOutputPort == nodegraph::invalid_port_idx) {
+				result = nodeHandle;
+			}
+		});
+
+		return result;
+	}
+
+	void findPassOrder(nodegraph::node_handle outputPass, std::vector<nodegraph::node_idx> *const order)
+	{
+		std::vector<bool> visited(graph.nodes.size(), false);
+
+		std::queue<nodegraph::node_idx> nodeq;
+		nodeq.push(outputPass.idx);
+		visited[outputPass.idx] = true;
+
+		while (!nodeq.empty()) {
+			nodegraph::node_idx nodeIdx = nodeq.back();
+			nodeq.pop();
+			order->push_back(nodeIdx);
+
+			// TODO: only follow valid links, return error if not all ports are connected
+			graph.iterNodeIncidentLinks(nodeIdx, [&](nodegraph::link_handle linkHandle) {
+				nodegraph::node_idx srcNode = graph.ports[graph.links[linkHandle.idx].srcPort].node;
+				if (!visited[srcNode]) {
+					visited[srcNode] = true;
+					nodeq.push(srcNode);
+				}
+			});
+		}
+
+		std::reverse(order->begin(), order->end());
+	}
+
+	void compile(CompiledPackage *const compiled) {
+		u32 alivePassCount = 0;
+		graph.iterNodes([&](nodegraph::node_handle) {
+			++alivePassCount;
+		});
+
+		compiled->orderedPasses.clear();
+
+		// Find the output pass
+		nodegraph::node_handle outputPass = getOutputPass();
+		if (!outputPass.valid()) {
+			return;
+		}
+
+		// Perform a topological sort, and identify the order to run passes in
+		std::vector<nodegraph::node_idx> passOrder;
+		findPassOrder(outputPass, &passOrder);
+
+		compiled->orderedPasses.resize(passOrder.size());
+		std::vector<CompiledPass*> passToCompiledPass(m_passes.size(), nullptr);
+
+		// Compile passes, create and load textures
+		u32 compiledPassIdx = 0;
+		for (const nodegraph::node_idx nodeIdx : passOrder) {
+			Pass& pass = *m_passes[nodeIdx];
+			pass.compile(&compiled->orderedPasses[compiledPassIdx]);
+			passToCompiledPass[nodeIdx] = &compiled->orderedPasses[compiledPassIdx];
+			++compiledPassIdx;
+		}
+
+		// Propagate texture inputs
+		for (const nodegraph::node_idx nodeIdx : passOrder) {
+			Pass& dstPass = *m_passes[nodeIdx];
+			CompiledPass& dstCompiled = *passToCompiledPass[nodeIdx];
+
+			graph.iterNodeIncidentLinks(nodeIdx, [&](nodegraph::link_handle linkHandle) {
+				const nodegraph::Link& link = graph.links[linkHandle.idx];
+				Pass& srcPass = *m_passes[graph.ports[link.srcPort].node];
+				CompiledPass& srcCompiled = *passToCompiledPass[graph.ports[link.srcPort].node];
+
+				const nodegraph::Port& srcPort = graph.ports[link.srcPort];
+				const nodegraph::Port& dstPort = graph.ports[link.dstPort];
+
+				const int srcParamIdx = srcPass.findParamByPortUid(srcPort.uid);
+				const int dstParamIdx = dstPass.findParamByPortUid(dstPort.uid);
+
+				if (srcParamIdx != -1 && dstParamIdx != -1) {
+					dstCompiled.compiledImages[dstParamIdx].tex = srcCompiled.compiledImages[srcParamIdx].tex;
+				}
+			});
+		}
+
+		compiled->outputTexture = nullptr;
+		for (auto& img : passToCompiledPass[outputPass.idx]->compiledImages) {
+			if (img.valid()) {
+				compiled->outputTexture = img.tex;
+				break;
+			}
 		}
 	}
 };
@@ -1293,111 +1604,30 @@ void drawFullscreenQuad(GLuint tex)
 	glUseProgram(0);
 }
 
-/*void createPassImages(Pass& pass, int width, int height)
+void renderProject(int width, int height)
 {
-	for (auto& param : pass.params()) {
-		if (ShaderParamType::Image2d == param.refl.type) {
-			TextureDesc& tex = param.value.textureValue;
+	for (shared_ptr<Package>& package : g_project.m_packages) {
+		CompiledPackage compiled;
+		package->compile(&compiled);
 
-			if (tex.source != TextureDesc::Source::Create && tex.transientCreated) {
-				tex.texture = nullptr;
-			} else if (tex.source == TextureDesc::Source::Create) {
-				if (tex.texture && (tex.texture->width != width || tex.texture->height != height)) {
-					tex.texture = nullptr;
-				}
+		if (!compiled.outputTexture) {
+			continue;
+		}
 
-				if (!tex.texture) {
-					GLuint tex1;
-					glGenTextures(1, &tex1);
-					glBindTexture(GL_TEXTURE_2D, tex1);
-					glTexStorage2D(GL_TEXTURE_2D, 1u, GL_RGBA16F, width, height);
+		for (auto& pass : compiled.orderedPasses) {
+			pass.render(width, height);
+		}
 
-					tex.texture = std::make_shared<CreatedTexture>();
-					tex.texture->width = width;
-					tex.texture->height = height;
-					tex.texture->samplerId = -1;
-					tex.texture->texId = tex1;
+		drawFullscreenQuad(compiled.outputTexture->texId);
+
+		for (auto& pass : compiled.orderedPasses) {
+			for (auto& img : pass.compiledImages) {
+				if (img.owned) {
+					img.release();
 				}
 			}
 		}
 	}
-}*/
-
-void renderProject(int width, int height)
-{
-	/*GLuint outputTexId = -1;
-
-	for (shared_ptr<Package>& package : g_project.m_packages) {
-		for (shared_ptr<Pass>& pass : package->m_passes) {
-			createPassImages(*pass, width, height);
-
-			GLint img_unit = 0;
-			GLint tex_unit = 0;
-
-			glUseProgram(pass->shader().m_programHandle);
-
-			for (const auto& param : pass->params()) {
-				const auto& refl = param.refl;
-				const auto& value = param.value;
-
-				if (refl.type == ShaderParamType::Float) {
-					glUniform1f(refl.location, value.floatValue);
-				} else if (refl.type == ShaderParamType::Float2) {
-					glUniform2f(refl.location, value.float2Value.x, value.float2Value.y);
-				} else if (refl.type == ShaderParamType::Float3) {
-					glUniform3f(refl.location, value.float3Value.x, value.float3Value.y, value.float3Value.z);
-				} else if (refl.type == ShaderParamType::Float4) {
-					glUniform4f(refl.location, value.float4Value.x, value.float4Value.y, value.float4Value.z, value.float4Value.w);
-				} else if (refl.type == ShaderParamType::Int) {
-					glUniform1i(refl.location, value.intValue);
-				} else if (refl.type == ShaderParamType::Int2) {
-					glUniform2i(refl.location, value.int2Value.x, value.int2Value.y);
-				} else if (refl.type == ShaderParamType::Int3) {
-					glUniform3i(refl.location, value.int3Value.x, value.int3Value.y, value.int3Value.z);
-				} else if (refl.type == ShaderParamType::Int4) {
-					glUniform4i(refl.location, value.int4Value.x, value.int4Value.y, value.int4Value.z, value.int4Value.w);
-				} else if (refl.type == ShaderParamType::Image2d) {
-					if (value.textureValue.texture) {
-						const GLint level = 0;
-						const GLenum layered = GL_FALSE;
-						glBindImageTexture(img_unit, value.textureValue.texture->texId, level, layered, 0, GL_READ_ONLY, GL_RGBA16F);
-						glUniform1i(refl.location, img_unit);
-						++img_unit;
-
-						// HACK
-						if (refl.name == "outputTex") {
-							outputTexId = value.textureValue.texture->texId;
-						}
-					}
-				} else if (refl.type == ShaderParamType::Sampler2d) {
-					if (value.textureValue.texture) {
-						const GLint level = 0;
-						const GLenum layered = GL_FALSE;
-						glActiveTexture(GL_TEXTURE0 + tex_unit);
-						glBindTexture(GL_TEXTURE_2D, value.textureValue.texture->texId);
-						glUniform1i(refl.location, tex_unit);
-
-						const GLuint samplerId = value.textureValue.texture->samplerId;
-						glSamplerParameteri(samplerId, GL_TEXTURE_WRAP_S, value.textureValue.wrapS ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-						glSamplerParameteri(samplerId, GL_TEXTURE_WRAP_T, value.textureValue.wrapT ? GL_REPEAT : GL_CLAMP_TO_EDGE);
-						glBindSampler(tex_unit, samplerId);
-						++tex_unit;
-					}
-				}
-			}
-
-			GLint workGroupSize[3];
-			glGetProgramiv(pass->shader().m_programHandle, GL_COMPUTE_WORK_GROUP_SIZE, workGroupSize);
-			glDispatchCompute(
-				(width + workGroupSize[0] - 1) / workGroupSize[0],
-				(height + workGroupSize[1] - 1) / workGroupSize[1],
-				1);
-		}
-
-		if (outputTexId != -1) {
-			drawFullscreenQuad(outputTexId);
-		}
-	}*/
 }
 
 void APIENTRY openGLDebugCallback(
@@ -1431,7 +1661,7 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 		portInfo.resize(graph.ports.size());
 		triggeredNode = nodegraph::node_handle();
 
-		graph.iterLiveNodes([&](nodegraph::node_handle nodeHandle)
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
 			Pass& pass = *package.m_passes[nodeHandle.idx];
 			{
@@ -1522,8 +1752,7 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 	void onNodeRemoved(nodegraph::node_handle node) override {
 		// HACK
 		Package& package = *g_project.m_packages[0];
-		Pass* pass = package.m_passes[node.idx].get();
-		package.deletePass(pass);
+		package.deletePass(node.idx);
 	}
 
 	/*bool canConnect(const LinkInfo& l) override {
