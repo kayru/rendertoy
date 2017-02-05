@@ -150,6 +150,13 @@ struct CreatedTexture {
 };
 
 struct TextureDesc {
+	TextureDesc()
+		: wrapS(true)
+		, wrapT(true)
+		, useRelativeScale(true)
+		, relativeScale(1, 1)
+	{}
+
 	enum class Source {
 		Load,
 		Create,
@@ -158,8 +165,14 @@ struct TextureDesc {
 
 	std::string path;
 	Source source = Source::Create;
-	bool wrapS = true;
-	bool wrapT = true;
+	u32 scaleRelativeToResourceUid = -1;
+	union {
+		vec2 relativeScale;
+		ivec2 resolution;
+	};
+	bool wrapS : 1;
+	bool wrapT : 1;
+	bool useRelativeScale : 1;
 };
 
 shared_ptr<CreatedTexture> createTexture(const TextureDesc& desc, const TextureKey& key)
@@ -965,6 +978,11 @@ void compileImage(const TextureDesc& desc, CompiledImage *const compiled)
 	}
 }
 
+struct PassCompilerSettings
+{
+	ivec2 windowSize;
+};
+
 
 struct Pass
 {
@@ -989,7 +1007,7 @@ struct Pass
 		return m_computeShader;
 	}
 
-	void compile(CompiledPass *const compiled)
+	void compile(const PassCompilerSettings& settings, CompiledPass *const compiled)
 	{
 		compiled->shader = &m_computeShader;
 		compiled->params = params();
@@ -1218,7 +1236,7 @@ struct Package
 		std::reverse(order->begin(), order->end());
 	}
 
-	void compile(CompiledPackage *const compiled) {
+	void compile(const PassCompilerSettings& settings, CompiledPackage *const compiled) {
 		u32 alivePassCount = 0;
 		graph.iterNodes([&](nodegraph::node_handle) {
 			++alivePassCount;
@@ -1242,17 +1260,12 @@ struct Package
 		// Compile passes, create and load textures
 		u32 compiledPassIdx = 0;
 		for (const nodegraph::node_idx nodeIdx : passOrder) {
-			Pass& pass = *m_passes[nodeIdx];
-			pass.compile(&compiled->orderedPasses[compiledPassIdx]);
-			passToCompiledPass[nodeIdx] = &compiled->orderedPasses[compiledPassIdx];
-			++compiledPassIdx;
-		}
-
-		// Propagate texture inputs
-		for (const nodegraph::node_idx nodeIdx : passOrder) {
 			Pass& dstPass = *m_passes[nodeIdx];
-			CompiledPass& dstCompiled = *passToCompiledPass[nodeIdx];
+			dstPass.compile(settings, &compiled->orderedPasses[compiledPassIdx]);
+			CompiledPass& dstCompiled = compiled->orderedPasses[compiledPassIdx++];
+			passToCompiledPass[nodeIdx] = &dstCompiled;
 
+			// Propagate texture inputs
 			graph.iterNodeIncidentLinks(nodeIdx, [&](nodegraph::link_handle linkHandle) {
 				const nodegraph::Link& link = graph.links[linkHandle.idx];
 				Pass& srcPass = *m_passes[graph.ports[link.srcPort].node];
@@ -1607,8 +1620,11 @@ void drawFullscreenQuad(GLuint tex)
 void renderProject(int width, int height)
 {
 	for (shared_ptr<Package>& package : g_project.m_packages) {
+		PassCompilerSettings settings;
+		settings.windowSize = ivec2(width, height);
+
 		CompiledPackage compiled;
-		package->compile(&compiled);
+		package->compile(settings, &compiled);
 
 		if (!compiled.outputTexture) {
 			continue;

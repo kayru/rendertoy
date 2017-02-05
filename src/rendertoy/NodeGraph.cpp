@@ -17,6 +17,10 @@ const static ImColor invalidPortColor = ImColor(255, 32, 8, 255);
 const static ImColor defaultPortLabelColor = ImColor(255, 255, 255, 255);
 const static ImColor invalidPortLabelColor = ImColor(255, 32, 8, 255);
 
+namespace ImGui {
+	IMGUI_API void ClearActiveID();
+}
+
 // NB: You can use math functions/operators on ImVec2 if you #define IMGUI_DEFINE_MATH_OPERATORS and #include "imgui_internal.h"
 static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x+rhs.x, lhs.y+rhs.y); }
 static inline ImVec2 operator-(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x-rhs.x, lhs.y-rhs.y); }
@@ -65,8 +69,9 @@ struct NodeState
 
 enum DragState {
 	DragState_Default,
-	DragState_DraggingConnected,
+	DragState_DraggingOut,
 	DragState_Dragging,
+	DragState_DropSelect,
 };
 
 void GetBezierCurvePathVertices(ImVector<ImVec2>* path, const ImVec2& p1, const ImVec2& p2, const ImVec2& p3, const ImVec2& p4);
@@ -97,6 +102,7 @@ struct Connector {
 };
 
 static std::vector<nodegraph::port_handle> s_dragPorts;
+static std::vector<nodegraph::port_handle> s_validDropPorts;
 static bool s_draggingOutput;
 static DragState s_dragState = DragState_Default;
 
@@ -204,148 +210,223 @@ struct NodeGraphState
 		return ports[h.idx].pos;
 	}
 
+	bool canDropDragOnPort(nodegraph::Graph& graph, nodegraph::port_handle port) const
+	{
+		bool canDropAll = true;
+		for (auto dragPort : s_dragPorts) {
+			nodegraph::node_handle dragNode = graph.getPortNode(dragPort);
+			bool canDrop = false;
+
+			nodegraph::node_handle conNode = graph.getPortNode(port);
+			if (conNode.idx != dragNode.idx) {
+				// TODO: more checks
+
+				canDrop = true;
+			}
+
+			canDropAll = canDropAll && canDrop;
+		}
+
+		return canDropAll;
+	}
+
+	void handleDrop(nodegraph::Graph& graph, nodegraph::port_handle portHandle)
+	{
+		// Add all the connections
+
+		for (auto dragPort : s_dragPorts) {
+			nodegraph::node_handle dragNode = graph.getPortNode(dragPort);
+			nodegraph::LinkDesc li;
+
+			if (s_draggingOutput) {
+				li = { dragPort, portHandle };
+			}
+			else {
+				li = { portHandle, dragPort };
+			}
+
+			graph.addLink(li);
+		}
+	}
+
 	// Must be called after drawNodes
 	void updateDragging(nodegraph::Graph& graph, INodeGraphGuiGlue& glue, ImDrawList* const drawList, ImVec2 offset)
 	{
-		switch (s_dragState)
-		{
-		case DragState_Default:
-		{
-			Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 1.5f);
-			if (con.port.valid()) {
-				if (ImGui::IsMouseClicked(0)) {
-					s_dragPorts.push_back(con.port);
-					s_draggingOutput = con.isOutput;
+		// Loop the state machine as long as the states keep changing
+		DragState prevDragState;
+		do {
+			prevDragState = s_dragState;
 
-					const bool dragOutInput = !con.isOutput && graph.ports[con.port.idx].link != nodegraph::invalid_link_idx;
-					const bool dragOutInvalidOutput = con.isOutput && !ports[con.port.idx].valid;
+			switch (s_dragState)
+			{
+			case DragState_Default:
+			{
+				Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 1.5f);
+				if (con.port.valid()) {
+					if (ImGui::IsMouseClicked(0)) {
+						s_dragPorts.push_back(con.port);
+						s_draggingOutput = con.isOutput;
 
-					if (dragOutInput || dragOutInvalidOutput) {
-						s_dragState = DragState_DraggingConnected;
-					} else {
-						s_dragState = DragState_Dragging;
+						const bool dragOutInput = !con.isOutput && graph.ports[con.port.idx].link != nodegraph::invalid_link_idx;
+						const bool dragOutInvalidOutput = con.isOutput && !ports[con.port.idx].valid;
+
+						if (dragOutInput || dragOutInvalidOutput) {
+							s_dragState = DragState_DraggingOut;
+						} else {
+							s_dragState = DragState_Dragging;
+						}
+
+						// Prevent dragging of the node; the active element is now the wire.
+						ImGui::ClearActiveID();
 					}
 				}
-			}
-			break;
-		}
-
-		case DragState_DraggingConnected:
-		{
-			assert(1 == s_dragPorts.size());
-
-			const bool drop = !ImGui::IsMouseDown(0);
-			if (drop) {
-				stopDragging();
-				return;
+				break;
 			}
 
-			Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 3.f);
-			if (!con.port.valid() || s_dragPorts[0] != con.port)
+			case DragState_DraggingOut:
 			{
-				nodegraph::port_idx detachedPort = s_dragPorts[0].idx;
-				s_dragPorts.clear();
+				assert(1 == s_dragPorts.size());
 
-				if (!s_draggingOutput) {
-					nodegraph::link_idx link = graph.ports[detachedPort].link;
-					nodegraph::port_handle srcPort = graph.portHandle(graph.links[link].srcPort);
-					s_dragPorts.push_back(srcPort);
-					graph.removeLink(link);
-				} else {
-					nodegraph::link_idx toRemove = nodegraph::invalid_link_idx;
-					graph.iterOutputPortLinks(graph.portHandle(detachedPort), [&](nodegraph::port_handle link) {
-						nodegraph::port_handle dstPort = graph.portHandle(graph.links[link.idx].dstPort);
-						s_dragPorts.push_back(dstPort);
+				const bool drop = !ImGui::IsMouseDown(0);
+				if (drop) {
+					stopDragging();
+					return;
+				}
 
-						// Can't remove the current link, but we can remove the previous one.
+				Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 3.f);
+				if (!con.port.valid() || s_dragPorts[0] != con.port)
+				{
+					nodegraph::port_idx detachedPort = s_dragPorts[0].idx;
+					s_dragPorts.clear();
+
+					if (!s_draggingOutput) {
+						nodegraph::link_idx link = graph.ports[detachedPort].link;
+						nodegraph::port_handle srcPort = graph.portHandle(graph.links[link].srcPort);
+						s_dragPorts.push_back(srcPort);
+						graph.removeLink(link);
+					} else {
+						nodegraph::link_idx toRemove = nodegraph::invalid_link_idx;
+						graph.iterOutputPortLinks(graph.portHandle(detachedPort), [&](nodegraph::port_handle link) {
+							nodegraph::port_handle dstPort = graph.portHandle(graph.links[link.idx].dstPort);
+							s_dragPorts.push_back(dstPort);
+
+							// Can't remove the current link, but we can remove the previous one.
+							if (toRemove != nodegraph::invalid_link_idx) {
+								graph.removeLink(toRemove);
+							}
+							toRemove = link.idx;
+						});
+
+						// Nuke the last link if any
 						if (toRemove != nodegraph::invalid_link_idx) {
 							graph.removeLink(toRemove);
 						}
-						toRemove = link.idx;
-					});
-
-					// Nuke the last link if any
-					if (toRemove != nodegraph::invalid_link_idx) {
-						graph.removeLink(toRemove);
 					}
+
+					s_draggingOutput = !s_draggingOutput;
+					s_dragState = DragState_Dragging;
 				}
 
-				s_draggingOutput = !s_draggingOutput;
-				s_dragState = DragState_Dragging;
+				break;
 			}
 
-			break;
-		}
-
-		case DragState_Dragging:
-		{
-			if (s_draggingOutput) {
-				assert(1 == s_dragPorts.size());
-				BezierCurve linkCurve = getNodeLinkCurve(getPortPos(s_dragPorts[0]), ImGui::GetIO().MousePos);
-				drawNodeLink(drawList, linkCurve);
-			} else {
-				for (auto port : s_dragPorts) {
-					BezierCurve linkCurve = getNodeLinkCurve(ImGui::GetIO().MousePos, getPortPos(port));
-					drawNodeLink(drawList, linkCurve);
-				}
-			}
-
-			const bool drop = !ImGui::IsMouseDown(0);
-
-			Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 3.f);
-			if (con.port.valid())
+			case DragState_Dragging:
 			{
-				nodegraph::node_handle conNode = graph.getPortNode(con.port);
-
-				bool canDropAll = true;
-				for (auto dragPort : s_dragPorts) {
-					nodegraph::node_handle dragNode = graph.getPortNode(dragPort);
-					bool canDrop = false;
-
-					if (conNode.idx != dragNode.idx && con.isOutput != s_draggingOutput) {
-						// TODO: more checks
-
-						canDrop = true;
+				if (s_draggingOutput) {
+					assert(1 == s_dragPorts.size());
+					BezierCurve linkCurve = getNodeLinkCurve(getPortPos(s_dragPorts[0]), ImGui::GetIO().MousePos);
+					drawNodeLink(drawList, linkCurve);
+				} else {
+					for (auto port : s_dragPorts) {
+						BezierCurve linkCurve = getNodeLinkCurve(ImGui::GetIO().MousePos, getPortPos(port));
+						drawNodeLink(drawList, linkCurve);
 					}
-
-					canDropAll = canDropAll && canDrop;
 				}
 
-				if (canDropAll)
-				{
-					drawList->ChannelsSetCurrent(2);
-					drawNodeConnector(drawList, getPortPos(con.port), ImColor(32, 220, 120, 255));
+				const bool drop = !ImGui::IsMouseDown(0);
 
-					if (drop)
-					{
-						// Add all the connections
+				Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 3.f);
 
-						for (auto dragPort : s_dragPorts) {
-							nodegraph::node_handle dragNode = graph.getPortNode(dragPort);
-							nodegraph::LinkDesc li;
+				if (!con.port.valid()) {
+					if (nodeHoveredInScene.valid()) {
+						s_validDropPorts.clear();
 
-							if (s_draggingOutput) {
-								li = { dragPort, con.port };
+						if (s_draggingOutput) {
+							graph.iterNodeInputPorts(nodeHoveredInScene, [&](nodegraph::port_handle portHandle) {
+								if (canDropDragOnPort(graph, portHandle)) {
+									s_validDropPorts.push_back(portHandle);
+								}
+							});
+						} else {
+							graph.iterNodeOutputPorts(nodeHoveredInScene, [&](nodegraph::port_handle portHandle) {
+								if (canDropDragOnPort(graph, portHandle)) {
+									s_validDropPorts.push_back(portHandle);
+								}
+							});
+						}
+
+						for (auto& portHandle : s_validDropPorts) {
+							drawList->ChannelsSetCurrent(2);
+							drawNodeConnector(drawList, getPortPos(portHandle), ImColor(32, 220, 120, 255));
+						}
+
+						if (drop) {
+							/*if (1 == s_validDropPorts.size()) {
+								handleDrop(graph, s_validDropPorts[0]);
+							} else */if (s_validDropPorts.size() > 0) {
+								ImGui::OpenPopup("DropSelect");
+								s_dragState = DragState_DropSelect;
+								break;
 							}
-							else {
-								li = { con.port, dragPort };
-							}
-
-							graph.addLink(li);
 						}
 					}
 				}
+
+				if (con.port.valid())
+				{
+					const bool canDropAll = con.isOutput != s_draggingOutput && canDropDragOnPort(graph, con.port);
+					if (canDropAll)
+					{
+						drawList->ChannelsSetCurrent(2);
+						drawNodeConnector(drawList, getPortPos(con.port), ImColor(32, 220, 120, 255));
+
+						if (drop)
+						{
+							handleDrop(graph, con.port);
+						}
+					}
+				}
+
+				if (drop) {
+					stopDragging();
+					return;
+				}
+
+				break;
 			}
 
-			if (drop)
+			case DragState_DropSelect:
 			{
-				stopDragging();
-				return;
-			}
+				if (ImGui::BeginPopup("DropSelect"))
+				{
+					for (nodegraph::port_handle portHandle : s_validDropPorts) {
+						auto portInfo = glue.getPortInfo(portHandle);
 
-			break;
-		}
-		}
+						if (ImGui::MenuItem(portInfo.name.c_str(), NULL, false, true)) {
+							handleDrop(graph, portHandle);
+							stopDragging();
+						}
+					}
+
+					ImGui::EndPopup();
+				} else {
+					stopDragging();
+				}
+
+				break;
+			}
+			}
+		} while (prevDragState != s_dragState);
 	}
 
 	void drawNodes(nodegraph::Graph& graph, INodeGraphGuiGlue& glue, ImDrawList* const drawList, const ImVec2& offset)
@@ -443,6 +524,7 @@ struct NodeGraphState
 			drawList->ChannelsSetCurrent(0); // Background
 			ImGui::SetCursorScreenPos(node_rect_min);
 			ImGui::InvisibleButton("node", node.Size);
+
 			if (ImGui::IsItemHovered())
 			{
 				nodeHoveredInScene = nodeHandle;
@@ -455,7 +537,7 @@ struct NodeGraphState
 			bool node_moving_active = ImGui::IsItemActive();
 			if (node_widgets_active || node_moving_active)
 				nodeSelected = nodeHandle;
-			if (node_moving_active && ImGui::IsMouseDragging(0) && s_dragState == DragState_Default)
+			if (node_moving_active && ImGui::IsMouseDragging(0))
 				node.Pos = node.Pos + ImGui::GetIO().MouseDelta;
 
 			ImU32 node_bg_color = (nodeHoveredInScene == nodeHandle || nodeSelected == nodeHandle) ? ImColor(75, 75, 75) : ImColor(60, 60, 60);
