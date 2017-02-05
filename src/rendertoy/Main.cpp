@@ -23,8 +23,8 @@
 #include <fstream>
 #include <shellapi.h>
 
-struct Pass;
-std::shared_ptr<Pass> g_editedPass = nullptr;
+struct IRenderPass;
+std::shared_ptr<IRenderPass> g_editedPass = nullptr;
 
 using std::vector;
 using std::shared_ptr;
@@ -443,7 +443,7 @@ struct ShaderParamRefl {
 };
 
 struct ShaderParamBindingRefl : ShaderParamRefl {
-	GLint location;
+	GLint location = -1;
 };
 
 ShaderParamType parseShaderType(GLenum type, GLint size)
@@ -878,6 +878,11 @@ struct CompiledPass
 
 	void render(u32 width, u32 height)
 	{
+		// TODO: clean up. this is only there for the Output node which doesn't have a shader
+		if (!shader) {
+			return;
+		}
+
 		glUseProgram(shader->m_programHandle);
 		u32 imgUnit = 0;
 		u32 texUnit = 0;
@@ -983,8 +988,63 @@ struct PassCompilerSettings
 	ivec2 windowSize;
 };
 
+struct IRenderPass
+{
+	virtual ShaderParamIterProxy params() = 0;
+	virtual void compile(const PassCompilerSettings& settings, CompiledPass *const compiled) = 0;
+	virtual int findParamByPortUid(nodegraph::port_uid uid) const = 0;
+	virtual std::string getDisplayName() const = 0;
+	virtual bool canBeRemoved() const = 0;
 
-struct Pass
+	static u32 nextParamUid() {
+		static u32 i = 0;
+		return ++i;
+	}
+};
+
+struct OutputPass : IRenderPass
+{
+	OutputPass()
+	{
+		ShaderParamBindingRefl param;
+		param.name = "image";
+		param.type = ShaderParamType::Image2d;
+		m_paramRefl.push_back(param);
+		ShaderParamValue value;
+		value.textureValue.source = TextureDesc::Source::Input;
+		m_paramValues.push_back(value);
+		m_paramUids.push_back(nextParamUid());
+	}
+
+	ShaderParamIterProxy params() override {
+		return ShaderParamIterProxy(m_paramRefl, m_paramValues, m_paramUids);
+	}
+
+	void compile(const PassCompilerSettings& settings, CompiledPass *const compiled) override {
+		compiled->compiledImages.resize(1);
+		compileImage(m_paramValues[0].textureValue, &compiled->compiledImages[0]);
+	}
+
+	int findParamByPortUid(nodegraph::port_uid uid) const override {
+		assert(uid == m_paramUids[0]);
+		return 0;
+	}
+
+	std::string getDisplayName() const override {
+		return "Output";
+	}
+
+	bool canBeRemoved() const override {
+		return false;
+	}
+
+private:
+	std::vector<ShaderParamBindingRefl> m_paramRefl;
+	std::vector<ShaderParamValue> m_paramValues;
+	std::vector<u32> m_paramUids;
+};
+
+struct Pass : IRenderPass
 {
 	Pass(const std::string& shaderPath)
 	{
@@ -999,15 +1059,15 @@ struct Pass
 		});
 	}
 
-	ShaderParamIterProxy params() {
+	ShaderParamIterProxy params() override {
 		return ShaderParamIterProxy(m_computeShader.m_params, m_paramValues, m_paramUids);
 	}
 
 	const ComputeShader& shader() const {
 		return m_computeShader;
 	}
-
-	void compile(const PassCompilerSettings& settings, CompiledPass *const compiled)
+ 
+	void compile(const PassCompilerSettings& settings, CompiledPass *const compiled) override
 	{
 		compiled->shader = &m_computeShader;
 		compiled->params = params();
@@ -1025,7 +1085,8 @@ struct Pass
 		}
 	}
 
-	int findParamByPortUid(nodegraph::port_uid uid) const {
+	int findParamByPortUid(nodegraph::port_uid uid) const override
+	{
 		for (int i = 0; i < int(m_paramUids.size()); ++i) {
 			if (m_paramUids[i] == uid) {
 				return i;
@@ -1035,14 +1096,17 @@ struct Pass
 		return -1;
 	}
 
-	nodegraph::node_handle m_nodeHandle;
-
-private:
-	u32 nextParamUid() {
-		static u32 i = 0;
-		return ++i;
+	std::string getDisplayName() const override
+	{
+		std::string filename = fs::path(m_computeShader.m_sourceFile).filename().string();
+		return filename.substr(0, filename.find_last_of("."));
 	}
 
+	bool canBeRemoved() const override {
+		return true;
+	}
+
+private:
 	void updateParams() {
 		std::vector<ShaderParamValue> newValues(m_computeShader.m_params.size());
 		std::vector<u32> newUids(m_computeShader.m_params.size());
@@ -1148,14 +1212,18 @@ struct CompiledPackage
 
 struct Package
 {
-	vector<shared_ptr<Pass>> m_passes;
+	vector<shared_ptr<IRenderPass>> m_passes;
 	nodegraph::Graph graph;
+
+	void addOutputPass() {
+		addPass(make_shared<OutputPass>());
+	}
 
 	void deletePass(u32 passIndex) {
 		m_passes[passIndex] = nullptr;
 	}
 
-	void getNodeDesc(Pass& pass, nodegraph::NodeDesc *const desc)
+	void getNodeDesc(IRenderPass& pass, nodegraph::NodeDesc *const desc)
 	{
 		desc->inputs.clear();
 		desc->outputs.clear();
@@ -1173,7 +1241,7 @@ struct Package
 	{
 		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
-			Pass& pass = *m_passes[nodeHandle.idx];
+			IRenderPass& pass = *m_passes[nodeHandle.idx];
 			nodegraph::NodeDesc desc;
 			getNodeDesc(pass, &desc);
 			graph.updateNode(nodeHandle, desc);
@@ -1183,17 +1251,7 @@ struct Package
 	void handleFileDrop(const std::string& path)
 	{
 		if (ends_with(path, ".glsl")) {
-			auto pass = make_shared<Pass>(path);
-
-			nodegraph::NodeDesc desc;
-			getNodeDesc(*pass, &desc);
-			nodegraph::node_handle nodeHandle = graph.addNode(desc);
-
-			if (m_passes.size() == nodeHandle.idx) {
-				m_passes.emplace_back(pass);
-			} else {
-				m_passes[nodeHandle.idx] = pass;
-			}
+			addPass(make_shared<Pass>(path));
 		}
 	}
 
@@ -1260,7 +1318,7 @@ struct Package
 		// Compile passes, create and load textures
 		u32 compiledPassIdx = 0;
 		for (const nodegraph::node_idx nodeIdx : passOrder) {
-			Pass& dstPass = *m_passes[nodeIdx];
+			IRenderPass& dstPass = *m_passes[nodeIdx];
 			dstPass.compile(settings, &compiled->orderedPasses[compiledPassIdx]);
 			CompiledPass& dstCompiled = compiled->orderedPasses[compiledPassIdx++];
 			passToCompiledPass[nodeIdx] = &dstCompiled;
@@ -1268,7 +1326,7 @@ struct Package
 			// Propagate texture inputs
 			graph.iterNodeIncidentLinks(nodeIdx, [&](nodegraph::link_handle linkHandle) {
 				const nodegraph::Link& link = graph.links[linkHandle.idx];
-				Pass& srcPass = *m_passes[graph.ports[link.srcPort].node];
+				IRenderPass& srcPass = *m_passes[graph.ports[link.srcPort].node];
 				CompiledPass& srcCompiled = *passToCompiledPass[graph.ports[link.srcPort].node];
 
 				const nodegraph::Port& srcPort = graph.ports[link.srcPort];
@@ -1289,6 +1347,22 @@ struct Package
 				compiled->outputTexture = img.tex;
 				break;
 			}
+		}
+	}
+
+private:
+
+	void addPass(shared_ptr<IRenderPass> pass)
+	{
+		nodegraph::NodeDesc desc;
+		getNodeDesc(*pass, &desc);
+		nodegraph::node_handle nodeHandle = graph.addNode(desc);
+
+		if (m_passes.size() == nodeHandle.idx) {
+			m_passes.emplace_back(pass);
+		}
+		else {
+			m_passes[nodeHandle.idx] = pass;
 		}
 	}
 };
@@ -1502,6 +1576,13 @@ void doPassUi(Pass& pass)
 	ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);*/
 }
 
+void doPassUi(IRenderPass& pass)
+{
+	if (auto p = dynamic_cast<Pass*>(&pass)) {
+		doPassUi(*p);
+	}
+}
+
 static void windowErrorCallback(int error, const char* description)
 {
 	fprintf(stderr, "Error %d: %s\n", error, description);
@@ -1679,11 +1760,8 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 
 		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
-			Pass& pass = *package.m_passes[nodeHandle.idx];
-			{
-				std::string filename = fs::path(pass.shader().m_sourceFile).filename().string();
-				nodeNames[nodeHandle.idx] = filename.substr(0, filename.find_last_of("."));
-			}
+			IRenderPass& pass = *package.m_passes[nodeHandle.idx];
+			nodeNames[nodeHandle.idx] = pass.getDisplayName();
 
 			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
 				const nodegraph::Port& port = graph.ports[portHandle.idx];
@@ -1765,27 +1843,29 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 		triggeredNode = node;
 	}
 
-	void onNodeRemoved(nodegraph::node_handle node) override {
-		// HACK
-		Package& package = *g_project.m_packages[0];
-		package.deletePass(node.idx);
+	bool onRemoveNode(nodegraph::node_handle node) override {
+		Package& package = *g_project.m_packages[0];	// HACK
+		if (package.m_passes[node.idx]->canBeRemoved()) {
+			package.deletePass(node.idx);
+			return true;
+		} else {
+			return false;
+		}
 	}
 
-	/*bool canConnect(const LinkInfo& l) override {
-		Pass& src = *getPass(l.srcNode);
-		Pass& dst = *getPass(l.dstNode);
-
-		const char* srcName = src.m_nodeInfo.outputs[l.srcPort].name.data;
-		const char* dstName = dst.m_nodeInfo.inputs[l.dstPort].name.data;
-		auto p0 = std::find_if(src.params().begin(), src.params().end(), [srcName](const auto& p) { return p.refl.name == srcName; });
-		auto p1 = std::find_if(dst.params().begin(), dst.params().end(), [dstName](const auto& p) { return p.refl.name == dstName; });
-		if (p0 == src.params().end()) return false;
-		if (p1 == dst.params().end()) return false;
-		if (p0->refl.type != p1->refl.type || p0->refl.type != ShaderParamType::Image2d) return false;
-		//p1->value.textureValue.texture = p0->value.textureValue.texture;
-
-		return true;
-	}*/
+	bool getNodeDesiredPosition(nodegraph::node_handle nodeHandle, float *const x, float *const y) const override
+	{
+		Package& package = *g_project.m_packages[0];	// HACK
+		if (dynamic_cast<OutputPass*>(package.m_passes[nodeHandle.idx].get())) {
+			// Spawn output nodes at the right side of the graph editor
+			ImVec2 windowSize = ImGui::GetWindowSize();
+			*x = windowSize.x * 0.7f;
+			*y = windowSize.y * 0.45f;
+			return true;
+		} else {
+			return false;
+		}
+	}
 };
 
 
@@ -1874,6 +1954,7 @@ int CALLBACK WinMain(
 	ImGui_ImplGlfwGL3_Init(window, true);
 
 	g_project.m_packages.push_back(make_shared<Package>());
+	g_project.m_packages.back()->addOutputPass();
 
 	ImVec4 clearColor = ImColor(75, 75, 75);
 	bool fullscreen = false;
@@ -1936,8 +2017,6 @@ int CALLBACK WinMain(
 				doPassUi(*g_editedPass);
 				ImGui::End();
 			} else if (g_project.m_packages.size() > 0) {
-				//nodeBackend.triggeredNode = nullptr;
-				//nodeBackend.shaderPackage = g_project.m_packages[0];
 				static NodeGraphGuiGlue guiGlue;
 				Package& package = *g_project.m_packages[0];
 				package.updateGraph();
@@ -1946,6 +2025,7 @@ int CALLBACK WinMain(
 
 				if (guiGlue.triggeredNode.valid()) {
 					g_editedPass = package.m_passes[guiGlue.triggeredNode.idx];
+					// TODO: prevent the GUI editor from appearing for Output nodes
 				}
 			}
 

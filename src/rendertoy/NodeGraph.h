@@ -481,6 +481,7 @@ namespace nodegraph {
 
 struct INodeGraphGuiGlue {
 	virtual std::string getNodeName(nodegraph::node_handle) const = 0;
+	virtual bool getNodeDesiredPosition(nodegraph::node_handle, float *const x, float *const y) const = 0;
 
 	struct PortInfo {
 		std::string name;
@@ -491,7 +492,7 @@ struct INodeGraphGuiGlue {
 
 	virtual void onContextMenu() = 0;
 	virtual void onTriggered(nodegraph::node_handle node) = 0;
-	virtual void onNodeRemoved(nodegraph::node_handle node) = 0;
+	virtual bool onRemoveNode(nodegraph::node_handle node) = 0;
 };
 
 void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiGlue& infoProvider);

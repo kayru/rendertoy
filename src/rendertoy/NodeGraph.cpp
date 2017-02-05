@@ -24,6 +24,7 @@ namespace ImGui {
 // NB: You can use math functions/operators on ImVec2 if you #define IMGUI_DEFINE_MATH_OPERATORS and #include "imgui_internal.h"
 static inline ImVec2 operator+(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x+rhs.x, lhs.y+rhs.y); }
 static inline ImVec2 operator-(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x-rhs.x, lhs.y-rhs.y); }
+static inline ImVec2 operator*(const ImVec2& lhs, const ImVec2& rhs) { return ImVec2(lhs.x * rhs.x, lhs.y * rhs.y); }
 static inline ImVec2 operator*(const ImVec2& lhs, const float rhs) { return ImVec2(lhs.x*rhs, lhs.y*rhs); }
 
 static float dot(const ImVec2& a, const ImVec2& b) {
@@ -371,9 +372,11 @@ struct NodeGraphState
 						}
 
 						if (drop) {
-							/*if (1 == s_validDropPorts.size()) {
+							if (1 == s_validDropPorts.size()) {
 								handleDrop(graph, s_validDropPorts[0]);
-							} else */if (s_validDropPorts.size() > 0) {
+								stopDragging();
+								break;
+							} else if (s_validDropPorts.size() > 0) {
 								ImGui::OpenPopup("DropSelect");
 								s_dragState = DragState_DropSelect;
 								break;
@@ -634,8 +637,16 @@ struct NodeGraphState
 		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
 		{
 			if (nodes[nodeHandle.idx].Size.x == 0) {
-				const ImVec2 mousePos = ImGui::GetIO().MousePos + scrolling - this->originOffset;
-				nodes[nodeHandle.idx].Pos = mousePos;
+				ImVec2 spawnPos;
+
+				float desiredX, desiredY;
+				if (glue.getNodeDesiredPosition(nodeHandle, &desiredX, &desiredY)) {
+					spawnPos = scrolling - this->originOffset + ImVec2(desiredX, desiredY);
+				} else {
+					spawnPos = ImGui::GetIO().MousePos + scrolling - this->originOffset;
+				}
+
+				nodes[nodeHandle.idx].Pos = spawnPos;
 			}
 		});
 
@@ -669,13 +680,12 @@ struct NodeGraphState
 				nodeSelected = nodeHoveredInScene;
 		}
 
-		// TODO: exclusive selection among nodes and links
-
 		const ImGuiIO& io = ImGui::GetIO();
 		if (nodeSelected.valid() && ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
-			glue.onNodeRemoved(nodeSelected);
-			graph.removeNode(nodeSelected);
-			nodeSelected = nodegraph::node_handle();
+			if (glue.onRemoveNode(nodeSelected)) {
+				graph.removeNode(nodeSelected);
+				nodeSelected = nodegraph::node_handle();
+			}
 		}
 
 		// Draw context menu
