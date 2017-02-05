@@ -990,6 +990,7 @@ struct PassCompilerSettings
 
 struct IRenderPass
 {
+	virtual ~IRenderPass() {}
 	virtual ShaderParamIterProxy params() = 0;
 	virtual void compile(const PassCompilerSettings& settings, CompiledPass *const compiled) = 0;
 	virtual int findParamByPortUid(nodegraph::port_uid uid) const = 0;
@@ -1057,6 +1058,10 @@ struct Pass : IRenderPass
 				updateParams();
 			}
 		});
+	}
+
+	~Pass() {
+		FileWatcher::stopWatchingFile(m_computeShader.m_sourceFile.c_str());
 	}
 
 	ShaderParamIterProxy params() override {
@@ -1989,7 +1994,7 @@ int CALLBACK WinMain(
 			g_windowEvents.pop();
 		}
 
-		if (!fullscreen)
+		if (!fullscreen && !maximized)
 		{
 			ImGui::BeginMainMenuBar();
 			const int mainMenuHeight = ImGui::GetWindowHeight();
@@ -2040,7 +2045,7 @@ int CALLBACK WinMain(
 		glClearColor(clearColor.x, clearColor.y, clearColor.z, clearColor.w);
 		glClear(GL_COLOR_BUFFER_BIT);
 
-		const u32 renderHeight = fullscreen ? display_h : display_h / 2;
+		const u32 renderHeight = (fullscreen || maximized) ? display_h : display_h / 2;
 		glViewport(0, 0, display_w, renderHeight);
 		glScissor(0, 0, display_w, renderHeight);
 		glEnable(GL_FRAMEBUFFER_SRGB);

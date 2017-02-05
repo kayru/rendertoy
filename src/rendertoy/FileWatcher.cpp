@@ -4,10 +4,10 @@
 #include <thread>
 #include <string>
 #include <vector>
-#include <queue>
 #include <mutex>
 #include <chrono>
 #include <memory>
+#include <algorithm>
 #include <cassert>
 
 namespace FileWatcher {
@@ -38,8 +38,9 @@ namespace FileWatcher {
 	std::vector<MD5Digest>		fileDigests;
 	std::vector<bool>			fileModifiedFlags;
 	std::vector<Callback>		callbacks;
-	std::queue<u32>				callbacksQueued;
-	std::queue<u32>				callbacksDispatching;
+
+	std::vector<u32>			callbacksQueued;
+	std::vector<u32>			callbacksDispatching;
 
 	std::thread					watcherThread;
 	bool						threadStopping = true;
@@ -85,6 +86,30 @@ namespace FileWatcher {
 		publicApiMutex.unlock();
 	}
 
+	void stopWatchingFile(const char* const path) {
+		publicApiMutex.lock();
+		watcherMutex.lock();
+
+		std::string pathStr = path;
+		auto found = std::find(watchedFiles.begin(), watchedFiles.end(), pathStr);
+		if (found != watchedFiles.end()) {
+			const u32 idx = found - watchedFiles.begin();
+
+			callbacksQueued.erase(
+				std::remove(callbacksQueued.begin(), callbacksQueued.end(), idx),
+				callbacksQueued.end()
+			);
+
+			watchedFiles.erase(watchedFiles.begin() + idx);
+			fileDigests.erase(fileDigests.begin() + idx);
+			fileModifiedFlags.erase(fileModifiedFlags.begin() + idx);
+			callbacks.erase(callbacks.begin() + idx);
+		}
+
+		watcherMutex.unlock();
+		publicApiMutex.unlock();
+	}
+
 	void threadFunc() {
 		size_t fileIdxCounter = 0;
 
@@ -99,7 +124,7 @@ namespace FileWatcher {
 					if (calculateFileDigest(watchedFiles[i], &digest) && digest != fileDigests[i]) {
 						fileModifiedFlags[i] = true;
 						fileDigests[i] = digest;
-						callbacksQueued.push(u32(i));
+						callbacksQueued.push_back(u32(i));
 					}
 				}
 
@@ -116,12 +141,12 @@ namespace FileWatcher {
 				callbacksDispatching.swap(callbacksQueued);
 			watcherMutex.unlock();
 
-			while (!callbacksDispatching.empty()) {
-				const u32 callbackIdx = callbacksDispatching.front();
-				callbacksDispatching.pop();
+			for (u32 callbackIdx : callbacksDispatching) {
 				callbacks[callbackIdx]();
 				fileModifiedFlags[callbackIdx] = false;
 			}
+
+			callbacksDispatching.clear();
 		publicApiMutex.unlock();
 	}
 
