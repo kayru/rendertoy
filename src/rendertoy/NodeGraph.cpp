@@ -648,8 +648,9 @@ struct NodeGraphState
 
 				nodes[nodeHandle.idx].Pos = spawnPos;
 			}
-		});
 
+			glue.updateNodePosition(nodeHandle, nodes[nodeHandle.idx].Pos.x, nodes[nodeHandle.idx].Pos.y);
+		});
 
 		ImGui::BeginGroup();
 		ImGui::PushItemWidth(120.0f);

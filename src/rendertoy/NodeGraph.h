@@ -493,6 +493,7 @@ struct INodeGraphGuiGlue {
 	virtual void onContextMenu() = 0;
 	virtual void onTriggered(nodegraph::node_handle node) = 0;
 	virtual bool onRemoveNode(nodegraph::node_handle node) = 0;
+	virtual void updateNodePosition(nodegraph::node_handle, float x, float y) = 0;
 };
 
 void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiGlue& infoProvider);

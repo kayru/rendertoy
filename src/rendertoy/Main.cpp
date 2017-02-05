@@ -11,7 +11,8 @@
 #include <stdio.h>
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
-#include <rapidjson/rapidjson.h>
+#include <rapidjson/document.h>
+#include <rapidjson/prettywriter.h>
 #include <tinyexr.h>
 #include <queue>
 #include <string>
@@ -31,6 +32,8 @@
 #ifdef min
 #undef min
 #endif
+
+using JsonWriter = rapidjson::PrettyWriter<rapidjson::StringBuffer>;
 
 struct IRenderPass;
 std::shared_ptr<IRenderPass> g_editedPass = nullptr;
@@ -991,6 +994,7 @@ struct IRenderPass
 	virtual int findParamByPortUid(nodegraph::port_uid uid) const = 0;
 	virtual std::string getDisplayName() const = 0;
 	virtual bool canBeRemoved() const = 0;
+	virtual void serialize(JsonWriter& writer) = 0;
 
 	static u32 nextParamUid() {
 		static u32 i = 0;
@@ -1077,6 +1081,13 @@ struct OutputPass : IRenderPass
 		return false;
 	}
 
+	void serialize(JsonWriter& writer) override
+	{
+		writer.String("type");
+		writer.String("Output");
+	}
+
+
 private:
 	std::vector<ShaderParamBindingRefl> m_paramRefl;
 	std::vector<ShaderParamValue> m_paramValues;
@@ -1152,6 +1163,15 @@ struct Pass : IRenderPass
 
 	bool canBeRemoved() const override {
 		return true;
+	}
+
+	void serialize(JsonWriter& writer) override
+	{
+		writer.String("type");
+		writer.String("Compute");
+
+		writer.String("shader");
+		writer.String(m_computeShader.m_sourceFile.c_str());
 	}
 
 private:
@@ -1250,6 +1270,60 @@ bool needsOutputPort(const ShaderParamProxy& param)
 bool needsInputPort(const ShaderParamProxy& param)
 {
 	return param.refl.type == ShaderParamType::Image2d && param.value.textureValue.source == TextureDesc::Source::Input;
+}
+
+void serializeGraph(nodegraph::Graph& graph, JsonWriter& writer)
+{
+	writer.String("nodes");
+	writer.StartArray();
+
+	graph.iterNodes([&](nodegraph::node_handle nodeHandle) {
+		writer.StartObject();
+
+		writer.String("idx");
+		writer.Int(nodeHandle.idx);
+
+		writer.String("inputs");
+		writer.StartArray();
+		graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
+			writer.StartObject();
+
+			writer.String("idx");
+			writer.Int(portHandle.idx);
+
+			const nodegraph::Port& port = graph.ports[portHandle.idx];
+			writer.String("uid");
+			writer.Int(port.uid);
+
+			if (port.link != nodegraph::invalid_link_idx) {
+				writer.String("link");
+				writer.Int(port.link);
+			}
+
+			writer.EndObject();
+		});
+		writer.EndArray();
+
+		writer.String("outputs");
+		writer.StartArray();
+		graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
+			writer.StartObject();
+
+			writer.String("idx");
+			writer.Int(portHandle.idx);
+
+			const nodegraph::Port& port = graph.ports[portHandle.idx];
+			writer.String("uid");
+			writer.Int(port.uid);
+
+			writer.EndObject();
+		});
+		writer.EndArray();
+
+		writer.EndObject();
+	});
+
+	writer.EndArray();
 }
 
 struct CompiledPackage
@@ -1400,6 +1474,28 @@ struct Package
 				break;
 			}
 		}
+	}
+
+	void serialize(JsonWriter& writer)
+	{
+		writer.String("passes");
+		writer.StartArray();
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle){
+			writer.StartObject();
+
+			writer.String("idx");
+			writer.Int(nodeHandle.idx);
+
+			m_passes[nodeHandle.idx]->serialize(writer);
+
+			writer.EndObject();
+		});
+		writer.EndArray();
+
+		writer.String("graph");
+		writer.StartObject();
+		serializeGraph(graph, writer);
+		writer.EndObject();
 	}
 
 private:
@@ -1678,8 +1774,169 @@ struct WindowEvent {
 	};
 };
 
+
+struct NodeGraphGuiGlue : INodeGraphGuiGlue
+{
+	std::vector<std::string> nodeNames;
+	std::vector<vec2> nodePositions;
+	std::vector<PortInfo> portInfo;
+	nodegraph::node_handle triggeredNode;
+
+	void updateInfoFromPackage(Package& package)
+	{
+		nodegraph::Graph& graph = package.graph;
+		nodeNames.resize(graph.nodes.size());
+		portInfo.resize(graph.ports.size());
+		nodePositions.resize(graph.nodes.size());
+		triggeredNode = nodegraph::node_handle();
+
+		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
+		{
+			IRenderPass& pass = *package.m_passes[nodeHandle.idx];
+			nodeNames[nodeHandle.idx] = pass.getDisplayName();
+
+			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
+				const nodegraph::Port& port = graph.ports[portHandle.idx];
+				auto param = std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
+					return param.uid == port.uid;
+				});
+
+				if (param != pass.params().end()) {
+					if (needsInputPort(*param)) {
+						portInfo[portHandle.idx] = PortInfo{ param->refl.name, true };
+					}
+					else {
+						// This parameter should not be exposed anymore
+						graph.removePort(portHandle);
+					}
+				}
+				else {
+					portInfo[portHandle.idx].valid = false;
+				}
+			});
+
+			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
+				const nodegraph::Port& port = graph.ports[portHandle.idx];
+				auto param = std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
+					return param.uid == port.uid;
+				});
+				if (param != pass.params().end()) {
+					if (needsOutputPort(*param)) {
+						portInfo[portHandle.idx] = PortInfo{ param->refl.name, true };
+					}
+					else {
+						// This parameter should not be exposed anymore
+						graph.removePort(portHandle);
+					}
+				}
+				else {
+					portInfo[portHandle.idx].valid = false;
+				}
+			});
+		});
+	}
+
+	std::string getNodeName(nodegraph::node_handle h) const override
+	{
+		return nodeNames[h.idx];
+	}
+
+	PortInfo getPortInfo(nodegraph::port_handle h) const override
+	{
+		return portInfo[h.idx];
+	}
+
+	void onContextMenu() override
+	{
+		std::vector<std::string> items;
+		getGlobalContextMenuItems(&items);
+
+		for (std::string& it : items) {
+			if (ImGui::MenuItem(it.c_str(), NULL, false, true)) {
+				onGlobalContextMenuSelected(it);
+			}
+		}
+	}
+
+	void getGlobalContextMenuItems(std::vector<std::string> *const items)
+	{
+		std::vector<fs::path> files;
+		getFilesMatchingExtension("data", ".glsl", files);
+
+		for (const fs::path& f : files) {
+			std::string filename = f.filename().string();
+			items->push_back(filename.substr(0, filename.find_last_of(".")));
+		}
+	}
+
+	void onGlobalContextMenuSelected(const std::string& shaderFile)
+	{
+		g_project.handleFileDrop("data/" + shaderFile + ".glsl");
+	}
+
+	void onTriggered(nodegraph::node_handle node) override {
+		triggeredNode = node;
+	}
+
+	bool onRemoveNode(nodegraph::node_handle node) override {
+		Package& package = *g_project.m_packages[0];	// HACK
+		if (package.m_passes[node.idx]->canBeRemoved()) {
+			package.deletePass(node.idx);
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+
+	bool getNodeDesiredPosition(nodegraph::node_handle nodeHandle, float *const x, float *const y) const override
+	{
+		Package& package = *g_project.m_packages[0];	// HACK
+		if (dynamic_cast<OutputPass*>(package.m_passes[nodeHandle.idx].get())) {
+			// Spawn output nodes at the right side of the graph editor
+			ImVec2 windowSize = ImGui::GetWindowSize();
+			*x = windowSize.x * 0.7f;
+			*y = windowSize.y * 0.45f;
+			return true;
+		}
+		else {
+			return false;
+		}
+	}
+
+	void updateNodePosition(nodegraph::node_handle nodeHandle, float x, float y) override
+	{
+		nodePositions[nodeHandle.idx] = vec2(x, y);
+	}
+
+	void serialize(JsonWriter& writer)
+	{
+		writer.String("nodes");
+		writer.StartArray();
+		
+		for (size_t i = 0; i < nodePositions.size(); ++i) {
+			writer.StartObject();
+
+			writer.String("idx");
+			writer.Int(i);
+
+			writer.String("pos");
+			writer.StartArray();
+			writer.Double(nodePositions[i].x);
+			writer.Double(nodePositions[i].y);
+			writer.EndArray();
+
+			writer.EndObject();
+		}
+
+		writer.EndArray();
+	}
+};
+
+
 GLFWwindow* g_mainWindow = nullptr;
 std::queue<WindowEvent> g_windowEvents;
+NodeGraphGuiGlue guiGlue;
 
 extern void ImGui_ImplGlfwGL3_KeyCallback(GLFWwindow*, int, int, int, int);
 static void windowKeyCallback(GLFWwindow* window, int key, int scancode, int action, int mods)
@@ -1700,7 +1957,20 @@ void doMainMenu()
 
 		}
 		if (ImGui::MenuItem("Save", nullptr)) {
+			rapidjson::StringBuffer sb;
+			rapidjson::PrettyWriter<rapidjson::StringBuffer> writer(sb);
 
+			writer.StartObject();
+			g_project.m_packages[0]->serialize(writer);
+
+			writer.String("gui");
+			writer.StartObject();
+			guiGlue.serialize(writer);
+			writer.EndObject();
+
+			writer.EndObject();
+
+			puts(sb.GetString());
 		}
 		if (ImGui::MenuItem("Exit", nullptr)) {
 			glfwSetWindowShouldClose(g_mainWindow, 1);
@@ -1820,137 +2090,13 @@ void APIENTRY openGLDebugCallback(
 	}
 }
 
-struct NodeGraphGuiGlue : INodeGraphGuiGlue
-{
-	std::vector<std::string> nodeNames;
-	std::vector<PortInfo> portInfo;
-	nodegraph::node_handle triggeredNode;
-
-	void updateInfoFromPackage(Package& package)
-	{
-		nodegraph::Graph& graph = package.graph;
-		nodeNames.resize(graph.nodes.size());
-		portInfo.resize(graph.ports.size());
-		triggeredNode = nodegraph::node_handle();
-
-		graph.iterNodes([&](nodegraph::node_handle nodeHandle)
-		{
-			IRenderPass& pass = *package.m_passes[nodeHandle.idx];
-			nodeNames[nodeHandle.idx] = pass.getDisplayName();
-
-			graph.iterNodeInputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
-				const nodegraph::Port& port = graph.ports[portHandle.idx];
-				auto param = std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
-					return param.uid == port.uid;
-				});
-
-				if (param != pass.params().end()) {
-					if (needsInputPort(*param)) {
-						portInfo[portHandle.idx] = PortInfo{ param->refl.name, true };
-					} else {
-						// This parameter should not be exposed anymore
-						graph.removePort(portHandle);
-					}
-				} else {
-					portInfo[portHandle.idx].valid = false;
-				}
-			});
-
-			graph.iterNodeOutputPorts(nodeHandle, [&](nodegraph::port_handle portHandle) {
-				const nodegraph::Port& port = graph.ports[portHandle.idx];
-				auto param = std::find_if(pass.params().begin(), pass.params().end(), [&](auto param) {
-					return param.uid == port.uid;
-				});
-				if (param != pass.params().end()) {
-					if (needsOutputPort(*param)) {
-						portInfo[portHandle.idx] = PortInfo{ param->refl.name, true };
-					}
-					else {
-						// This parameter should not be exposed anymore
-						graph.removePort(portHandle);
-					}
-				} else {
-					portInfo[portHandle.idx].valid = false;
-				}
-			});
-		});
-	}
-
-	std::string getNodeName(nodegraph::node_handle h) const override
-	{
-		return nodeNames[h.idx];
-	}
-	
-	PortInfo getPortInfo(nodegraph::port_handle h) const override
-	{
-		return portInfo[h.idx];
-	}
-
-	void onContextMenu() override
-	{
-		std::vector<std::string> items;
-		getGlobalContextMenuItems(&items);
-
-		for (std::string& it : items) {
-			if (ImGui::MenuItem(it.c_str(), NULL, false, true)) {
-				onGlobalContextMenuSelected(it);
-			}
-		}
-	}
-
-	void getGlobalContextMenuItems(std::vector<std::string> *const items)
-	{
-		std::vector<fs::path> files;
-		getFilesMatchingExtension("data", ".glsl", files);
-
-		for (const fs::path& f : files) {
-			std::string filename = f.filename().string();
-			items->push_back(filename.substr(0, filename.find_last_of(".")));
-		}
-	}
-
-	void onGlobalContextMenuSelected(const std::string& shaderFile)
-	{
-		g_project.handleFileDrop("data/" + shaderFile + ".glsl");
-	}
-
-	void onTriggered(nodegraph::node_handle node) override {
-		triggeredNode = node;
-	}
-
-	bool onRemoveNode(nodegraph::node_handle node) override {
-		Package& package = *g_project.m_packages[0];	// HACK
-		if (package.m_passes[node.idx]->canBeRemoved()) {
-			package.deletePass(node.idx);
-			return true;
-		} else {
-			return false;
-		}
-	}
-
-	bool getNodeDesiredPosition(nodegraph::node_handle nodeHandle, float *const x, float *const y) const override
-	{
-		Package& package = *g_project.m_packages[0];	// HACK
-		if (dynamic_cast<OutputPass*>(package.m_passes[nodeHandle.idx].get())) {
-			// Spawn output nodes at the right side of the graph editor
-			ImVec2 windowSize = ImGui::GetWindowSize();
-			*x = windowSize.x * 0.7f;
-			*y = windowSize.y * 0.45f;
-			return true;
-		} else {
-			return false;
-		}
-	}
-};
-
-
-//int main(int, char**)
-int CALLBACK WinMain(
+int main(int, char**)
+/*int CALLBACK WinMain(
 	_In_ HINSTANCE hInstance,
 	_In_ HINSTANCE hPrevInstance,
 	_In_ LPSTR     lpCmdLine,
 	_In_ int       nCmdShow
-) {
+)*/ {
 	// Setup window
 	glfwSetErrorCallback(&windowErrorCallback);
 	FileWatcher::start();
@@ -2092,7 +2238,6 @@ int CALLBACK WinMain(
 				doPassUi(*g_editedPass);
 				ImGui::End();
 			} else if (g_project.m_packages.size() > 0) {
-				static NodeGraphGuiGlue guiGlue;
 				Package& package = *g_project.m_packages[0];
 				package.updateGraph();
 				guiGlue.updateInfoFromPackage(package);
