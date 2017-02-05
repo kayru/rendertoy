@@ -835,6 +835,10 @@ struct ShaderParamIterProxy {
 	Iterator begin() { return Iterator(this, 0); }
 	Iterator end() { return Iterator(this, refls->size()); }
 
+	size_t size() const {
+		return refls->size();
+	}
+
 	friend struct Iterator;
 private:
 	const std::vector<ShaderParamBindingRefl>* refls = nullptr;
@@ -1057,7 +1061,6 @@ struct OutputPass : IRenderPass
 	}
 
 	void compile(const PassCompilerSettings& settings, CompiledPass *const compiled) override {
-		compiled->compiledImages.resize(1);
 		compileImage(settings, *this, m_paramValues[0].textureValue, &compiled->compiledImages[0], compiled);
 	}
 
@@ -1112,8 +1115,6 @@ struct Pass : IRenderPass
 		compiled->shader = &m_computeShader;
 		compiled->params = params();
 		compiled->paramLocations.resize(m_paramRefl.size());
-		compiled->compiledImages.clear();
-		compiled->compiledImages.resize(m_paramRefl.size());
 
 		// Compile Loaded images first, so that we can have Created images relative to their dimensions
 		for (size_t i = 0; i < m_paramRefl.size(); ++i) {
@@ -1366,9 +1367,11 @@ struct Package
 		u32 compiledPassIdx = 0;
 		for (const nodegraph::node_idx nodeIdx : passOrder) {
 			IRenderPass& dstPass = *m_passes[nodeIdx];
-			dstPass.compile(settings, &compiled->orderedPasses[compiledPassIdx]);
 			CompiledPass& dstCompiled = compiled->orderedPasses[compiledPassIdx++];
 			passToCompiledPass[nodeIdx] = &dstCompiled;
+
+			dstCompiled.compiledImages.clear();
+			dstCompiled.compiledImages.resize(dstPass.params().size());
 
 			// Propagate texture inputs
 			graph.iterNodeIncidentLinks(nodeIdx, [&](nodegraph::link_handle linkHandle) {
@@ -1386,6 +1389,8 @@ struct Package
 					dstCompiled.compiledImages[dstParamIdx].tex = srcCompiled.compiledImages[srcParamIdx].tex;
 				}
 			});
+
+			dstPass.compile(settings, &dstCompiled);
 		}
 
 		compiled->outputTexture = nullptr;
@@ -1769,8 +1774,20 @@ void renderProject(int width, int height)
 		}
 
 		for (auto& pass : compiled.orderedPasses) {
-			// TODO: proper dispatch size
-			pass.render(width, height);
+			int dispatchWidth = width;
+			int dispatchHeight = height;
+
+			// TODO: proper dispatch size setting
+			// For now, we get the dispatch size from the first output image of the shader
+			for (auto& img : pass.compiledImages) {
+				if (img.owned) {
+					dispatchWidth = img.tex->key.width;
+					dispatchHeight = img.tex->key.height;
+					break;
+				}
+			}
+
+			pass.render(dispatchWidth, dispatchHeight);
 		}
 
 		drawFullscreenQuad(compiled.outputTexture->texId);
