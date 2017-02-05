@@ -21,7 +21,16 @@
 #include <cctype>
 #include <filesystem>
 #include <fstream>
+#include <algorithm>
 #include <shellapi.h>
+
+#ifdef max
+#undef max
+#endif
+
+#ifdef min
+#undef min
+#endif
 
 struct IRenderPass;
 std::shared_ptr<IRenderPass> g_editedPass = nullptr;
@@ -155,6 +164,7 @@ struct TextureDesc {
 		, wrapT(true)
 		, useRelativeScale(true)
 		, relativeScale(1, 1)
+		, resolution(1280, 720)
 	{}
 
 	enum class Source {
@@ -166,10 +176,8 @@ struct TextureDesc {
 	std::string path;
 	Source source = Source::Create;
 	u32 scaleRelativeToResourceUid = -1;
-	union {
-		vec2 relativeScale;
-		ivec2 resolution;
-	};
+	vec2 relativeScale;
+	ivec2 resolution;
 	bool wrapS : 1;
 	bool wrapT : 1;
 	bool useRelativeScale : 1;
@@ -361,7 +369,7 @@ enum class ShaderParamType {
 
 struct ShaderParamValue {
 	ShaderParamValue() {
-		memset(this, 0, sizeof(*this));
+		int4Value = ivec4(0);
 	}
 
 	union {
@@ -952,14 +960,8 @@ struct CompiledPass
 	}
 };
 
-shared_ptr<CreatedTexture> createTransientTexture(const TextureDesc& desc)
+shared_ptr<CreatedTexture> createTransientTexture(const TextureDesc& desc, const TextureKey& key)
 {
-	TextureKey key = {
-		1280,
-		720,
-		GL_RGBA16F
-	};
-
 	auto existing = g_transientTextureCache.find(key);
 	if (existing != g_transientTextureCache.end()) {
 		auto res = existing->second;
@@ -971,17 +973,6 @@ shared_ptr<CreatedTexture> createTransientTexture(const TextureDesc& desc)
 	}
 }
 
-
-// Create or load the image
-void compileImage(const TextureDesc& desc, CompiledImage *const compiled)
-{
-	if (desc.source == TextureDesc::Source::Create) {
-		compiled->tex = createTransientTexture(desc);
-		compiled->owned = true;
-	} else if (desc.source == TextureDesc::Source::Load) {
-		compiled->tex = loadTexture(desc);
-	}
-}
 
 struct PassCompilerSettings
 {
@@ -1003,6 +994,50 @@ struct IRenderPass
 	}
 };
 
+// Create or load the image
+void compileImage(const PassCompilerSettings& settings, IRenderPass& pass, const TextureDesc& desc, CompiledImage *const compiled, const CompiledPass *const compiledPass)
+{
+	if (desc.source == TextureDesc::Source::Create) {
+		TextureKey key = { 1, 1, GL_RGBA16F };
+		if (desc.useRelativeScale) {
+			if (desc.scaleRelativeToResourceUid == -1) {
+				key.width = u32(std::max(0.0f, desc.relativeScale.x) * settings.windowSize.x);
+				key.height = u32(std::max(0.0f, desc.relativeScale.y) * settings.windowSize.y);
+			} else {
+				u32 otherParamIdx = 0;
+				for (const auto& param : pass.params()) {
+					if (param.uid == desc.scaleRelativeToResourceUid) {
+						const bool isImage = param.refl.type == ShaderParamType::Sampler2d || param.refl.type == ShaderParamType::Image2d;
+						const bool isInputImage = isImage && param.value.textureValue.source != TextureDesc::Source::Create;
+
+						if (isInputImage) {
+							auto& otherImgKey = compiledPass->compiledImages[otherParamIdx].tex->key;
+							key.width = u32(std::max(0.0f, desc.relativeScale.x) * otherImgKey.width);
+							key.height = u32(std::max(0.0f, desc.relativeScale.y) * otherImgKey.height);
+						} else {
+							// TODO: report an error. can only have scale relative to non-created textures
+						}
+					}
+
+					++otherParamIdx;
+				}
+			}
+		} else {
+			key.width = desc.resolution.x;
+			key.height = desc.resolution.y;
+		}
+
+		key.width = std::max(1u, key.width);
+		key.height = std::max(1u, key.height);
+
+		compiled->tex = createTransientTexture(desc, key);
+		compiled->owned = true;
+	}
+	else if (desc.source == TextureDesc::Source::Load) {
+		compiled->tex = loadTexture(desc);
+	}
+}
+
 struct OutputPass : IRenderPass
 {
 	OutputPass()
@@ -1023,7 +1058,7 @@ struct OutputPass : IRenderPass
 
 	void compile(const PassCompilerSettings& settings, CompiledPass *const compiled) override {
 		compiled->compiledImages.resize(1);
-		compileImage(m_paramValues[0].textureValue, &compiled->compiledImages[0]);
+		compileImage(settings, *this, m_paramValues[0].textureValue, &compiled->compiledImages[0], compiled);
 	}
 
 	int findParamByPortUid(nodegraph::port_uid uid) const override {
@@ -1080,12 +1115,19 @@ struct Pass : IRenderPass
 		compiled->compiledImages.clear();
 		compiled->compiledImages.resize(m_paramRefl.size());
 
+		// Compile Loaded images first, so that we can have Created images relative to their dimensions
+		for (size_t i = 0; i < m_paramRefl.size(); ++i) {
+			if (m_paramRefl[i].type == ShaderParamType::Image2d && m_paramValues[i].textureValue.source == TextureDesc::Source::Load) {
+				compileImage(settings, *this, m_paramValues[i].textureValue, &compiled->compiledImages[i], nullptr);
+			}
+		}
+
 		for (size_t i = 0; i < m_paramRefl.size(); ++i) {
 			const GLint loc = glGetUniformLocation(m_computeShader.m_programHandle, m_paramRefl[i].name.c_str());
 			compiled->paramLocations[i] = loc;
 
-			if (m_paramRefl[i].type == ShaderParamType::Image2d) {
-				compileImage(m_paramValues[i].textureValue, &compiled->compiledImages[i]);
+			if (m_paramRefl[i].type == ShaderParamType::Image2d && m_paramValues[i].textureValue.source != TextureDesc::Source::Load) {
+				compileImage(settings, *this, m_paramValues[i].textureValue, &compiled->compiledImages[i], compiled);
 			}
 		}
 	}
@@ -1520,40 +1562,50 @@ void doPassUi(Pass& pass)
 				ImGui::Combo("", &formatIdx, formats, sizeof(formats)/sizeof(*formats));
 
 				ImGui::SameLine();
-				static bool relativeSize = true;
+				bool relativeSize = value.textureValue.useRelativeScale;
 				ImGui::Checkbox("relative", &relativeSize);
+				value.textureValue.useRelativeScale = relativeSize;
 
 				if (relativeSize) {
 					ImGui::PushID("relativeSize");
-					float size[] = { 1.0, 1.0 };
 					ImGui::PushItemWidth(100);
 					ImGui::SameLine();
-					ImGui::InputFloat2("scale", size, 2);
+					ImGui::InputFloat2("scale", &value.textureValue.relativeScale.x, 2);
 					ImGui::SameLine();
 
-					int target = 0;
-					static std::vector<const char*> targets;
-					targets = {
-						"window",
-						"foo",
-						"bar",
-					};
+					static std::vector<const char*> targetNames;
+					static std::vector<u32> targetUids;
+					targetNames = { "Main Window" };
+					targetUids = { u32(-1) };
+
+					int targetIdx = 0;
+
+					for (auto& otherParam : pass.params()) {
+						if (otherParam.refl.type == ShaderParamType::Image2d && otherParam.value.textureValue.source != TextureDesc::Source::Create) {
+							targetNames.push_back(otherParam.refl.name.c_str());
+							if (otherParam.uid == value.textureValue.scaleRelativeToResourceUid) {
+								targetIdx = int(targetUids.size());
+							}
+							targetUids.push_back(otherParam.uid);
+						}
+					}
 
 					int sizeNeeded = 0;
-					for (const char* str : targets) {
+					for (const char* str : targetNames) {
 						sizeNeeded = std::max(sizeNeeded, (int)ImGui::CalcTextSize(str).x);
 					}
 					sizeNeeded += 32;
 
 					ImGui::PushItemWidth(sizeNeeded);
 					ImGui::SameLine();
-					ImGui::Combo("", &target, targets.data(), targets.size());
+					ImGui::Combo("", &targetIdx, targetNames.data(), targetNames.size());
 					ImGui::PopID();
+
+					value.textureValue.scaleRelativeToResourceUid = targetUids[targetIdx];
 				} else {
-					int size[] = { 256, 256 };
 					ImGui::PushItemWidth(100);
 					ImGui::SameLine();
-					ImGui::InputInt2("resolution", size);
+					ImGui::InputInt2("resolution", &value.textureValue.resolution.x);
 				}
 			}
 
@@ -1717,6 +1769,7 @@ void renderProject(int width, int height)
 		}
 
 		for (auto& pass : compiled.orderedPasses) {
+			// TODO: proper dispatch size
 			pass.render(width, height);
 		}
 
