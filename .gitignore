@@ -7,3 +7,4 @@ rendertoy.state
 t2-output
 *.cap
 *.lnk
+release/

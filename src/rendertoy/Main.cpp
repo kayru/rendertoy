@@ -1387,13 +1387,13 @@ void APIENTRY openGLDebugCallback(
 	}
 }
 
-int main(int, char**)
-/*int CALLBACK WinMain(
+//int main(int, char**)
+int CALLBACK WinMain(
 	_In_ HINSTANCE hInstance,
 	_In_ HINSTANCE hPrevInstance,
 	_In_ LPSTR     lpCmdLine,
 	_In_ int       nCmdShow
-)*/ {
+) {
 	// Setup window
 	glfwSetErrorCallback(&windowErrorCallback);
 	FileWatcher::start();
