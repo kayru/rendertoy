@@ -174,7 +174,7 @@ namespace nodegraph {
 			return { idx, nodes[idx].fingerprint };
 		}
 
-		port_idx addPort(node_idx node, port_uid uid)
+		port_handle addPort(node_idx node, port_uid uid)
 		{
 			port_idx idx;
 			if (deadPorts.size() > 0) {
@@ -190,7 +190,7 @@ namespace nodegraph {
 			port.node = node;
 			port.uid = uid;
 			port.link = invalid_link_idx;
-			return idx;
+			return { idx, port.fingerprint };
 		}
 
 		void addInputPortToNode(Node& node, port_idx port)
@@ -385,7 +385,7 @@ namespace nodegraph {
 				}
 
 				if (!found) {
-					port_idx port = addPort(std::distance(nodes.data(), &node), desc.inputs[descInputIdx]);
+					port_idx port = addPort(std::distance(nodes.data(), &node), desc.inputs[descInputIdx]).idx;
 					addInputPortToNode(node, port);
 				}
 			}
@@ -405,7 +405,7 @@ namespace nodegraph {
 				}
 
 				if (!found) {
-					port_idx port = addPort(std::distance(nodes.data(), &node), desc.outputs[descOutputIdx]);
+					port_idx port = addPort(std::distance(nodes.data(), &node), desc.outputs[descOutputIdx]).idx;
 					addOutputPortToNode(node, port);
 				}
 			}
@@ -442,9 +442,9 @@ namespace nodegraph {
 			firstLiveNode = idx;
 
 			if (desc.inputs.size() > 0) {
-				node.firstInputPort = addPort(idx, desc.inputs.back());
+				node.firstInputPort = addPort(idx, desc.inputs.back()).idx;
 				for (int i = desc.inputs.size() - 2; i >= 0; --i) {
-					port_idx p = addPort(idx, desc.inputs[i]);
+					port_idx p = addPort(idx, desc.inputs[i]).idx;
 					addInputPortToNode(node, p);
 				}
 			}
@@ -453,9 +453,9 @@ namespace nodegraph {
 			}
 
 			if (desc.outputs.size() > 0) {
-				node.firstOutputPort = addPort(idx, desc.outputs.back());
+				node.firstOutputPort = addPort(idx, desc.outputs.back()).idx;
 				for (int i = desc.outputs.size() - 2; i >= 0; --i) {
-					port_idx p = addPort(idx, desc.outputs[i]);
+					port_idx p = addPort(idx, desc.outputs[i]).idx;
 					addOutputPortToNode(node, p);
 				}
 			}
@@ -496,4 +496,5 @@ struct INodeGraphGuiGlue {
 	virtual void updateNodePosition(nodegraph::node_handle, float x, float y) = 0;
 };
 
+void resetNodeGraphGui(nodegraph::Graph& graph);
 void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiGlue& infoProvider);

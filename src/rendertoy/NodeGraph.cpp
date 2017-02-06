@@ -706,10 +706,14 @@ struct NodeGraphState
 	}
 };
 
-static std::unordered_map<ImGuiID, NodeGraphState> g_nodeGraphs;
+static std::unordered_map<void*, NodeGraphState> g_nodeGraphs;
+
+void resetNodeGraphGui(nodegraph::Graph& graph)
+{
+	g_nodeGraphs.erase(&graph);
+}
 
 void nodeGraph(nodegraph::Graph& graph, INodeGraphGuiGlue& glue)
 {
-	const ImGuiID id = ImGui::GetID(&graph);
-	g_nodeGraphs[id].doGui(graph, glue);
+	g_nodeGraphs[&graph].doGui(graph, glue);
 }
