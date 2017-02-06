@@ -185,11 +185,11 @@ struct NodeGraphState
 		return result;
 	}
 
-	const float NODE_SLOT_RADIUS = 5.0f;
+	const float NodeSlotRadius = 5.0f;
 
 	void drawNodeConnector(ImDrawList* const drawList, const ImVec2& pos, ImColor col = defaultPortColor)
 	{
-		drawList->AddCircleFilled(pos, NODE_SLOT_RADIUS, col, 12);
+		drawList->AddCircleFilled(pos, NodeSlotRadius, col, 12);
 	}
 
 	void stopDragging()
@@ -259,7 +259,7 @@ struct NodeGraphState
 			{
 			case DragState_Default:
 			{
-				Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 1.5f);
+				Connector con = getHoverCon(graph, offset, NodeSlotRadius * 1.5f);
 				if (con.port.valid()) {
 					if (ImGui::IsMouseClicked(0)) {
 						s_dragPorts.push_back(con.port);
@@ -292,7 +292,7 @@ struct NodeGraphState
 					return;
 				}
 
-				Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 3.f);
+				Connector con = getHoverCon(graph, offset, NodeSlotRadius * 3.f);
 				if (!con.port.valid() || s_dragPorts[0] != con.port)
 				{
 					nodegraph::port_idx detachedPort = s_dragPorts[0].idx;
@@ -346,7 +346,7 @@ struct NodeGraphState
 
 				const bool drop = !ImGui::IsMouseDown(0);
 
-				Connector con = getHoverCon(graph, offset, NODE_SLOT_RADIUS * 3.f);
+				Connector con = getHoverCon(graph, offset, NodeSlotRadius * 3.f);
 
 				if (!con.port.valid()) {
 					if (nodeHoveredInScene.valid()) {
@@ -437,7 +437,7 @@ struct NodeGraphState
 
 	void drawNodes(nodegraph::Graph& graph, INodeGraphGuiGlue& glue, ImDrawList* const drawList, const ImVec2& offset)
 	{
-		const ImVec2 NODE_WINDOW_PADDING(12.0f, 8.0f);
+		const ImVec2 NodeWindowPadding(12.0f, 8.0f);
 
 		if (ImGui::IsMouseClicked(0)) {
 			nodeSelected = nodegraph::node_handle();
@@ -448,12 +448,12 @@ struct NodeGraphState
 		{
 			NodeState& node = nodes[nodeHandle.idx];
 			ImGui::PushID(nodeHandle.idx);
-			ImVec2 node_rect_min = offset + node.Pos;
+			ImVec2 nodeRectMin = offset + node.Pos;
 
 			// Display node contents first
 			drawList->ChannelsSetCurrent(2); // Foreground
-			bool old_any_active = ImGui::IsAnyItemActive();
-			ImGui::SetCursorScreenPos(node_rect_min + NODE_WINDOW_PADDING);
+			const bool oldAnyActive = ImGui::IsAnyItemActive();
+			ImGui::SetCursorScreenPos(nodeRectMin + NodeWindowPadding);
 
 			ImGui::BeginGroup();
 			ImGui::Text(glue.getNodeName(nodeHandle).c_str());
@@ -475,7 +475,7 @@ struct NodeGraphState
 				ImGui::Text(portInfo.name.c_str());
 				ImGui::PopStyleColor();
 
-				ports[portHandle.idx].pos = cursorLeft + ImVec2(-NODE_WINDOW_PADDING.x, 0.5f * ImGui::GetItemRectSize().y);
+				ports[portHandle.idx].pos = cursorLeft + ImVec2(-NodeWindowPadding.x, 0.5f * ImGui::GetItemRectSize().y);
 				ports[portHandle.idx].valid = portInfo.valid;
 			});
 			ImGui::EndGroup();
@@ -509,7 +509,7 @@ struct NodeGraphState
 				ImGui::Text(name.c_str());
 				ImGui::PopStyleColor();
 
-				ports[portHandle.idx].pos = cursorLeft + ImVec2(NODE_WINDOW_PADDING.x + width, 0.5f * ImGui::GetItemRectSize().y);
+				ports[portHandle.idx].pos = cursorLeft + ImVec2(NodeWindowPadding.x + width, 0.5f * ImGui::GetItemRectSize().y);
 				ports[portHandle.idx].valid = portInfo.valid;
 			});
 			ImGui::EndGroup();
@@ -522,13 +522,13 @@ struct NodeGraphState
 			ImGui::GetCursorPos();
 
 			// Save the size of what we have emitted and whether any of the widgets are being used
-			bool node_widgets_active = (!old_any_active && ImGui::IsAnyItemActive());
-			node.Size = ImGui::GetItemRectSize() + NODE_WINDOW_PADDING + NODE_WINDOW_PADDING;
-			ImVec2 node_rect_max = node_rect_min + node.Size;
+			bool nodeWidgetsActive = (!oldAnyActive && ImGui::IsAnyItemActive());
+			node.Size = ImGui::GetItemRectSize() + NodeWindowPadding + NodeWindowPadding;
+			ImVec2 nodeRectMax = nodeRectMin + node.Size;
 
 			// Display node box
 			drawList->ChannelsSetCurrent(0); // Background
-			ImGui::SetCursorScreenPos(node_rect_min);
+			ImGui::SetCursorScreenPos(nodeRectMin);
 			ImGui::InvisibleButton("node", node.Size);
 
 			if (ImGui::IsItemHovered())
@@ -540,19 +540,19 @@ struct NodeGraphState
 					glue.onTriggered(nodeHandle);
 				}
 			}
-			bool node_moving_active = ImGui::IsItemActive();
-			if (node_widgets_active || node_moving_active)
+			bool nodeMovingActive = ImGui::IsItemActive();
+			if (nodeWidgetsActive || nodeMovingActive)
 				nodeSelected = nodeHandle;
-			if (node_moving_active && ImGui::IsMouseDragging(0))
+			if (nodeMovingActive && ImGui::IsMouseDragging(0))
 				node.Pos = node.Pos + ImGui::GetIO().MouseDelta;
 
-			ImU32 node_bg_color = (nodeHoveredInScene == nodeHandle || nodeSelected == nodeHandle) ? ImColor(75, 75, 75) : ImColor(60, 60, 60);
-			drawList->AddRectFilled(node_rect_min, node_rect_max, node_bg_color, 8.0f);
-			drawList->AddRectFilled(node_rect_min, ImVec2(node_rect_max.x, nodeHeaderMaxY - 6), ImColor(255, 255, 255, 32), 8.0f, 1 | 2);
+			ImU32 nodeBgColor = (nodeHoveredInScene == nodeHandle || nodeSelected == nodeHandle) ? ImColor(75, 75, 75) : ImColor(60, 60, 60);
+			drawList->AddRectFilled(nodeRectMin, nodeRectMax, nodeBgColor, 8.0f);
+			drawList->AddRectFilled(nodeRectMin, ImVec2(nodeRectMax.x, nodeHeaderMaxY - 6), ImColor(255, 255, 255, 32), 8.0f, 1 | 2);
 
 			ImColor frameColor = ImColor(255, 255, 255, 20);
-			drawList->AddLine(ImVec2(node_rect_min.x, nodeHeaderMaxY - 6 - 1), ImVec2(node_rect_max.x, nodeHeaderMaxY - 6 - 1), frameColor);
-			drawList->AddRect(node_rect_min, node_rect_max, frameColor, 8.0f);
+			drawList->AddLine(ImVec2(nodeRectMin.x, nodeHeaderMaxY - 6 - 1), ImVec2(nodeRectMax.x, nodeHeaderMaxY - 6 - 1), frameColor);
+			drawList->AddRect(nodeRectMin, nodeRectMax, frameColor, 8.0f);
 
 			drawList->ChannelsSetCurrent(2); // Foreground
 
@@ -594,23 +594,10 @@ struct NodeGraphState
 
 					ImColor linkColor = ImColor(200, 200, 100, 128);
 
-					/*if (f < 10.f) {
-					drawNodeLink(drawList, curve, ImColor(200, 200, 100, 255));
-
-					// TODO: selection of links.
-
-					const ImGuiIO& io = ImGui::GetIO();
-					if (ImGui::IsKeyReleased(io.KeyMap[ImGuiKey_Delete])) {
-					//link.requestDelete = true;
-					// TODO
+					if (!p1info.valid || !p2info.valid) {
+						linkColor = ImColor(255, 32, 8, 255);
 					}
-					}
-					else */ {
-						if (!p1info.valid || !p2info.valid) {
-							linkColor = ImColor(255, 32, 8, 255);
-						}
-						drawNodeLink(drawList, curve, linkColor);
-					}
+					drawNodeLink(drawList, curve, linkColor);
 				}
 			});
 		});
@@ -618,14 +605,14 @@ struct NodeGraphState
 
 	void drawGrid(ImDrawList* const drawList, const ImVec2& offset)
 	{
-		ImU32 GRID_COLOR = ImColor(255, 255, 255, 10);
-		float GRID_SZ = 32.0f;
-		ImVec2 win_pos = ImGui::GetCursorScreenPos();
-		ImVec2 canvas_sz = ImGui::GetWindowSize();
-		for (float x = fmodf(offset.x, GRID_SZ); x < canvas_sz.x; x += GRID_SZ)
-			drawList->AddLine(ImVec2(x, 0.0f) + win_pos, ImVec2(x, canvas_sz.y) + win_pos, GRID_COLOR);
-		for (float y = fmodf(offset.y, GRID_SZ); y < canvas_sz.y; y += GRID_SZ)
-			drawList->AddLine(ImVec2(0.0f, y) + win_pos, ImVec2(canvas_sz.x, y) + win_pos, GRID_COLOR);
+		const ImU32 GridColor = ImColor(255, 255, 255, 10);
+		const float GridSize = 32.0f;
+		ImVec2 winPos = ImGui::GetCursorScreenPos();
+		ImVec2 canvasSize = ImGui::GetWindowSize();
+		for (float x = fmodf(offset.x, GridSize); x < canvasSize.x; x += GridSize)
+			drawList->AddLine(ImVec2(x, 0.0f) + winPos, ImVec2(x, canvasSize.y) + winPos, GridColor);
+		for (float y = fmodf(offset.y, GridSize); y < canvasSize.y; y += GridSize)
+			drawList->AddLine(ImVec2(0.0f, y) + winPos, ImVec2(canvasSize.x, y) + winPos, GridColor);
 	}
 
 	void doGui(nodegraph::Graph& graph, INodeGraphGuiGlue& glue)
@@ -680,7 +667,7 @@ struct NodeGraphState
 		}
 		if (openContextMenu)
 		{
-			ImGui::OpenPopup("context_menu");
+			ImGui::OpenPopup("contextMenu");
 			if (nodeHoveredInScene.valid())
 				nodeSelected = nodeHoveredInScene;
 		}
@@ -695,7 +682,7 @@ struct NodeGraphState
 
 		// Draw context menu
 		ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(8, 8));
-		if (ImGui::BeginPopup("context_menu"))
+		if (ImGui::BeginPopup("contextMenu"))
 		{
 			glue.onContextMenu(/*nodeSelected*/);
 			ImGui::EndPopup();

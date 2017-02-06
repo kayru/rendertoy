@@ -1,6 +1,5 @@
 #pragma once
 #include "Common.h"
-#include <vector>
 #include <cassert>
 
 
@@ -69,8 +68,8 @@ namespace nodegraph {
 
 	struct NodeDesc
 	{
-		std::vector<port_uid> inputs;
-		std::vector<port_uid> outputs;
+		vector<port_uid> inputs;
+		vector<port_uid> outputs;
 	};
 
 	struct LinkDesc {
@@ -79,15 +78,15 @@ namespace nodegraph {
 	};
 
 	struct Graph {
-		std::vector<Port> ports;
-		std::vector<Link> links;
-		std::vector<Node> nodes;
+		vector<Port> ports;
+		vector<Link> links;
+		vector<Node> nodes;
 
 		node_idx firstLiveNode = invalid_node_idx;
 
-		std::vector<port_handle> deadPorts;
-		std::vector<link_handle> deadLinks;
-		std::vector<node_handle> deadNodes;
+		vector<port_handle> deadPorts;
+		vector<link_handle> deadLinks;
+		vector<node_handle> deadNodes;
 
 		template <typename Fn>
 		void iterNodes(Fn fn) const {

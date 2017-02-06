@@ -1,7 +1,7 @@
-uniform restrict image2D outputTex;
+uniform restrict image2D outputTex;	//@ relativeTo(someImage)
 uniform int blurRadius;	//@ max(30)
 uniform ivec2 blurDir;	//@ min(0) max(1)
-layout(rgba16f) uniform restrict readonly image2D someImage;	//@ input default
+layout(rgba16f) uniform restrict readonly image2D someImage;	//@ input
 
 layout (local_size_x = 8, local_size_y = 8) in;
 void main() {

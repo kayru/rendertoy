@@ -6,860 +6,33 @@
 #include "Math.h"
 #include "NodeGraph.h"
 #include "NodeGraphGui.h"
+#include "StringUtil.h"
+#include "FileUtil.h"
+#include "Shader.h"
+#include "Texture.h"
+#include "OsUtil.h"
 
 #include <imgui.h>
 #include "imgui_impl_glfw_gl3.h"
 #include <stdio.h>
+#define NOMINMAX	// glad.h, I'm not glad.
 #include <glad/glad.h>
 #include <GLFW/glfw3.h>
 #include <rapidjson/document.h>
 #include <rapidjson/prettywriter.h>
-#include <tinyexr.h>
 #include <queue>
 #include <string>
-#include <memory>
 #include <unordered_map>
 #include <unordered_set>
-#include <cctype>
-#include <filesystem>
 #include <fstream>
 #include <algorithm>
-#include <shellapi.h>
 
-#ifdef max
-#undef max
-#endif
-
-#ifdef min
-#undef min
-#endif
 
 using JsonWriter = rapidjson::PrettyWriter<rapidjson::StringBuffer>;
 
 struct IRenderPass;
 std::shared_ptr<IRenderPass> g_editedPass = nullptr;
 
-using std::vector;
-using std::shared_ptr;
-using std::make_shared;
-namespace fs = ::std::experimental::filesystem;
-
-bool ends_with(std::string const &fullString, std::string const &ending) {
-	if (fullString.length() >= ending.length()) {
-		return (0 == fullString.compare(fullString.length() - ending.length(), ending.length(), ending));
-	}
-	else {
-		return false;
-	}
-}
-
-// trim from start
-static inline std::string &ltrim(std::string &s) {
-	s.erase(s.begin(), std::find_if(s.begin(), s.end(),
-		std::not1(std::ptr_fun<int, int>(std::isspace))));
-	return s;
-}
-
-// trim from end
-static inline std::string &rtrim(std::string &s) {
-	s.erase(std::find_if(s.rbegin(), s.rend(),
-		std::not1(std::ptr_fun<int, int>(std::isspace))).base(), s.end());
-	return s;
-}
-
-// trim from both ends
-static inline std::string &trim(std::string &s) {
-	return ltrim(rtrim(s));
-}
-
-// return the filenames of all files that have the specified extension
-// in the specified directory and all subdirectories
-void getFilesMatchingExtension(const fs::path& root, const std::string& ext, vector<fs::path>& ret)
-{
-	if (!fs::exists(root) || !fs::is_directory(root)) return;
-
-	fs::recursive_directory_iterator it(root);
-	fs::recursive_directory_iterator endit;
-
-	while (it != endit)
-	{
-		if (fs::is_regular_file(*it) && it->path().extension() == ext) ret.push_back(it->path().filename());
-		++it;
-	}
-}
-
-static std::string getInfoLog(
-	GLuint object,
-	PFNGLGETSHADERIVPROC glGet__iv,
-	PFNGLGETSHADERINFOLOGPROC glGet__InfoLog
-)
-{
-	GLint log_length;
-	char *log;
-
-	glGet__iv(object, GL_INFO_LOG_LENGTH, &log_length);
-	log = (char*)malloc(log_length);
-	glGet__InfoLog(object, log_length, NULL, log);
-	std::string result = log;
-	free(log);
-
-	return result;
-}
-
-std::vector<char> loadTextFileZ(const char* path)
-{
-	std::vector<char> programSource;
-	const char* programSourceFile = path;
-	FILE *f = fopen(programSourceFile, "rb");
-	fseek(f, 0, SEEK_END);
-	const int fsize = ftell(f);
-	fseek(f, 0, SEEK_SET);
-	programSource.resize(fsize + 1);
-	fread(programSource.data(), 1, fsize, f);
-	fclose(f);
-	programSource.back() = '\0';
-	return programSource;
-}
-
-std::vector<char> loadShaderSource(const std::string& path, const char* preprocessorOptions)
-{
-	/*std::string preprocessedFile = path + ".preprocessed";
-
-	//if (getFileModifiedTime(preprocessedFile) < getFileModifiedTime(path))
-	{
-		std::string cmd = "cpp -P " + path + " -o " + preprocessedFile + " " + preprocessorOptions;
-		system(cmd.c_str());
-	}
-
-	std::vector<char> result = loadTextFileZ(preprocessedFile.c_str());*/
-
-	std::vector<char> result = loadTextFileZ(path.c_str());
-	std::string prefix = "#version 440\n#line 0\n";
-
-	result.insert(result.begin(), prefix.begin(), prefix.end());
-	return result;
-}
-
-struct TextureKey {
-	u32 width;
-	u32 height;
-	GLenum format;
-
-	bool operator==(const TextureKey& other) const {
-		return width == other.width && height == other.height && format == other.format;
-	}
-};
-
-
-struct CreatedTexture {
-	GLuint texId = 0;
-	GLuint samplerId = 0;
-	TextureKey key;
-
-	~CreatedTexture() {
-		if (texId != 0) glDeleteTextures(1, &texId);
-		if (samplerId != 0) glDeleteSamplers(1, &samplerId);
-	}
-};
-
-struct TextureDesc {
-	TextureDesc()
-		: wrapS(true)
-		, wrapT(true)
-		, useRelativeScale(true)
-		, relativeScale(1, 1)
-		, resolution(1280, 720)
-	{}
-
-	enum class Source {
-		Load,
-		Create,
-		Input
-	};
-
-	std::string path;
-	Source source = Source::Create;
-	std::string scaleRelativeTo;
-	vec2 relativeScale;
-	ivec2 resolution;
-	bool wrapS : 1;
-	bool wrapT : 1;
-	bool useRelativeScale : 1;
-};
-
-shared_ptr<CreatedTexture> createTexture(const TextureDesc& desc, const TextureKey& key)
-{
-	GLuint tex1;
-	glGenTextures(1, &tex1);
-	glBindTexture(GL_TEXTURE_2D, tex1);
-	glTexStorage2D(GL_TEXTURE_2D, 1u, GL_RGBA16F, key.width, key.height);
-
-	GLuint samplerId;
-	glGenSamplers(1, &samplerId);
-	glSamplerParameteri(samplerId, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
-	glSamplerParameteri(samplerId, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
-
-	auto tex = std::make_shared<CreatedTexture>();
-	tex->key = key;
-	tex->texId = tex1;
-	tex->samplerId = samplerId;
-	return tex;
-}
-
-std::unordered_map<std::string, shared_ptr<CreatedTexture>> g_loadedTextures;
-
-shared_ptr<CreatedTexture> loadTexture(const TextureDesc& desc) {
-	{
-		auto found = g_loadedTextures.find(desc.path);
-		if (found != g_loadedTextures.end()) {
-			return found->second;
-		}
-	}
-
-	int ret;
-	const char* err;
-
-	// 1. Read EXR version.
-	EXRVersion exr_version;
-
-	ret = ParseEXRVersionFromFile(&exr_version, desc.path.c_str());
-	if (ret != 0) {
-		fprintf(stderr, "Invalid EXR file: %s\n", desc.path.c_str());
-		return nullptr;
-	}
-
-	if (exr_version.multipart) {
-		// must be multipart flag is false.
-		printf("Multipart EXR not supported");
-		return nullptr;
-	}
-
-	// 2. Read EXR header
-	EXRHeader exr_header;
-	InitEXRHeader(&exr_header);
-
-	ret = ParseEXRHeaderFromFile(&exr_header, &exr_version, desc.path.c_str(), &err);
-	if (ret != 0) {
-		fprintf(stderr, "Parse EXR err: %s\n", err);
-		return nullptr;
-	}
-
-	EXRImage exr_image;
-	InitEXRImage(&exr_image);
-	
-	for (int i = 0; i < exr_header.num_channels; ++i) {
-		exr_header.requested_pixel_types[i] = TINYEXR_PIXELTYPE_HALF;
-	}
-
-	ret = LoadEXRImageFromFile(&exr_image, &exr_header, desc.path.c_str(), &err);
-	if (ret != 0) {
-		fprintf(stderr, "Load EXR err: %s\n", err);
-		return nullptr;
-	}
-
-	short* out_rgba = nullptr;
-
-	{
-		// RGBA
-		int idxR = -1;
-		int idxG = -1;
-		int idxB = -1;
-		int idxA = -1;
-		for (int c = 0; c < exr_header.num_channels; c++) {
-			if (strcmp(exr_header.channels[c].name, "R") == 0) {
-				idxR = c;
-			}
-			else if (strcmp(exr_header.channels[c].name, "G") == 0) {
-				idxG = c;
-			}
-			else if (strcmp(exr_header.channels[c].name, "B") == 0) {
-				idxB = c;
-			}
-			else if (strcmp(exr_header.channels[c].name, "A") == 0) {
-				idxA = c;
-			}
-		}
-
-		size_t imgSizeBytes = 4 * sizeof(short) * static_cast<size_t>(exr_image.width) * static_cast<size_t>(exr_image.height);
-
-		out_rgba = reinterpret_cast<short *>(malloc(imgSizeBytes));
-		memset(out_rgba, 0, imgSizeBytes);
-
-		auto loadChannel = [&](int chIdx, int compIdx) {
-			for (int y = 0; y < exr_image.height; ++y) {
-				for (int x = 0; x < exr_image.width; ++x) {
-					out_rgba[4 * (y * exr_image.width + x) + compIdx] =
-						reinterpret_cast<short**>(exr_image.images)[chIdx][((exr_image.height - y - 1) * exr_image.width + x)];
-				}
-			}
-		};
-
-		if (idxR != -1) loadChannel(idxR, 0);
-		if (idxG != -1) loadChannel(idxG, 1);
-		if (idxB != -1) loadChannel(idxB, 2);
-
-		if (idxA != -1) loadChannel(idxA, 3);
-		else {
-			const short one = 15 << 10;
-			for (int i = 0; i < exr_image.width * exr_image.height; i++) {
-				out_rgba[4 * i + 3] = one;
-			}
-		}
-	}
-
-	shared_ptr<CreatedTexture> res = createTexture(desc, TextureKey{ u32(exr_image.width), u32(exr_image.height), GL_RGBA16F });
-
-	glBindTexture(GL_TEXTURE_2D, res->texId);
-	glTexSubImage2D(GL_TEXTURE_2D, 0, 0, 0, exr_image.width, exr_image.height, GL_RGBA, GL_HALF_FLOAT, out_rgba);
-
-	FreeEXRHeader(&exr_header);
-	FreeEXRImage(&exr_image);
-
-	g_loadedTextures[desc.path] = res;
-	return res;
-}
-
-struct ParamAnnotation
-{
-	std::unordered_map<std::string, std::string> items;
-
-	const char* get(const std::string& value, const char* def) const {
-		auto it = items.find(value);
-		if (it != items.end()) {
-			return it->second.c_str();
-		} else {
-			return def;
-		}
-	}
-
-	float get(const std::string& value, float def) const {
-		auto it = items.find(value);
-		if (it != items.end()) {
-			return atof(it->second.c_str());
-		}
-		else {
-			return def;
-		}
-	}
-
-	int get(const std::string& value, int def) const {
-		auto it = items.find(value);
-		if (it != items.end()) {
-			return atoi(it->second.c_str());
-		}
-		else {
-			return def;
-		}
-	}
-
-	bool has(const std::string& value) const {
-		return items.find(value) != items.end();
-	}
-};
-
-enum class ShaderParamType {
-	Float,
-	Float2,
-	Float3,
-	Float4,
-	Int,
-	Int2,
-	Int3,
-	Int4,
-	Sampler2d,
-	Image2d,
-	Unknown,
-};
-
-struct ShaderParamValue {
-	ShaderParamValue() {
-		int4Value = ivec4(0);
-	}
-
-	union {
-		float floatValue;
-		vec2 float2Value;
-		vec3 float3Value;
-		vec4 float4Value;
-
-		int intValue;
-		ivec2 int2Value;
-		ivec3 int3Value;
-		ivec4 int4Value;
-	};
-
-	TextureDesc textureValue;
-
-	void assign(ShaderParamType type, const ShaderParamValue& other) {
-		float4Value = other.float4Value;
-		textureValue = other.textureValue;
-	}
-};
-
-struct ShaderParamRefl {
-	std::string name;
-	ShaderParamType type;
-	ParamAnnotation annotation;
-
-	ShaderParamValue defaultValue() const {
-		ShaderParamValue res;
-
-		if (ShaderParamType::Float == type) {
-			res.floatValue = annotation.get("default", 0.0f);
-		}
-		else if (ShaderParamType::Float2 == type) {
-			res.float2Value = vec2(annotation.get("default", 0.0f));
-		}
-		else if (ShaderParamType::Float3 == type) {
-			res.float3Value = vec3(annotation.get("default", annotation.has("color") ? 1.0f : 0.0f));
-		}
-		else if (ShaderParamType::Float4 == type) {
-			res.float4Value = vec4(annotation.get("default", annotation.has("color") ? 1.0f : 0.0f));
-		}
-		else if (ShaderParamType::Int == type) {
-			res.intValue = annotation.get("default", 0);
-		}
-		else if (ShaderParamType::Int2 == type) {
-			res.int2Value = ivec2(annotation.get("default", 0));
-		}
-		else if (ShaderParamType::Int3 == type) {
-			res.int3Value = ivec3(annotation.get("default", 0));
-		}
-		else if (ShaderParamType::Int4 == type) {
-			res.int4Value = ivec4(annotation.get("default", 0));
-		}
-		else if (ShaderParamType::Sampler2d == type) {
-			if (annotation.has("input")) {
-				res.textureValue.source = TextureDesc::Source::Input;
-			}
-			else if (annotation.has("default")) {
-				res.textureValue.path = annotation.get("default", "");
-				res.textureValue.source = TextureDesc::Source::Load;
-			} else {
-				res.textureValue.source = TextureDesc::Source::Create;
-			}
-		}
-		else if (ShaderParamType::Image2d == type) {
-			if (annotation.has("input")) {
-				res.textureValue.source = TextureDesc::Source::Input;
-			} else if (annotation.has("default")) {
-				res.textureValue.path = annotation.get("default", "");
-				res.textureValue.source = TextureDesc::Source::Load;
-			} else {
-				res.textureValue.source = TextureDesc::Source::Create;
-
-				if (annotation.has("relativeTo")) {
-					res.textureValue.scaleRelativeTo = annotation.get("relativeTo", "");
-					res.textureValue.useRelativeScale = true;
-
-					if (annotation.has("scale")) {
-						sscanf(annotation.get("scale", ""), "%f %f", &res.textureValue.relativeScale.x, &res.textureValue.relativeScale.y);
-					}
-				} else if (annotation.has("size")) {
-					sscanf(annotation.get("size", ""), "%u %u", &res.textureValue.resolution.x, &res.textureValue.resolution.y);
-				}
-			}
-		}
-
-		return res;
-	}
-};
-
-struct ShaderParamBindingRefl : ShaderParamRefl {
-	GLint location = -1;
-};
-
-ShaderParamType parseShaderType(GLenum type, GLint size)
-{
-	static std::unordered_map<GLenum, ShaderParamType> tmap = {
-		{ GL_FLOAT, ShaderParamType::Float },
-		{ GL_FLOAT_VEC2, ShaderParamType::Float2 },
-		{ GL_FLOAT_VEC3, ShaderParamType::Float3 },
-		{ GL_FLOAT_VEC4, ShaderParamType::Float4 },
-		{ GL_INT, ShaderParamType::Int },
-		{ GL_INT_VEC2, ShaderParamType::Int2 },
-		{ GL_INT_VEC3, ShaderParamType::Int3 },
-		{ GL_INT_VEC4, ShaderParamType::Int4 },
-		{ GL_SAMPLER_2D, ShaderParamType::Sampler2d },
-		{ GL_IMAGE_2D, ShaderParamType::Image2d },
-	};
-
-	auto it = tmap.find(type);
-	if (it != tmap.end()) {
-		return it->second;
-	}
-
-	return ShaderParamType::Unknown;
-}
-
-
-bool parseParenthesizedExpression(const char*& c, const char* aend) {
-	assert(*c == '(');
-	++c;
-	int level = 1;
-	while (c < aend) {
-		if ('(' == *c) ++level;
-		else if (')' == *c) {
-			--level;
-			if (0 == level) return true;
-		}
-		++c;
-	}
-
-	return false;
-}
-
-bool parseAnnotation(const char* abegin, const char* aend, ParamAnnotation *const annot)
-{
-	const char* c = abegin;
-	auto skipWhite = [&]() {
-		while (c < aend && isspace(*c)) ++c;
-		return c < aend;
-	};
-
-	while (c < aend) {
-		skipWhite();
-
-		if (isalnum(*c)) {
-			const char* tbegin = c;
-			while (isalnum(*c)) {
-				++c;
-			}
-			const char* tend = c;
-
-			skipWhite();
-
-			std::string annotValue;
-			if (*c == '(')
-			{
-				const char* const exprBegin = c;
-				if (!parseParenthesizedExpression(c, aend)) {
-					return false;
-				}
-
-				const char* const exprEnd = c;
-				assert('(' == *exprBegin);
-				assert(')' == *exprEnd);
-				annotValue = std::string(exprBegin + 1, exprEnd);
-				++c;
-			}
-
-			annot->items[std::string(tbegin, tend)] = annotValue;
-		}
-	}
-
-	return true;
-}
-
-// Returns 0 on failure
-GLuint makeShader(GLenum shaderType, const std::vector<char>& source, std::string *const errorLog)
-{
-	GLuint handle = glCreateShader(shaderType);
-	if (!handle) {
-		*errorLog = "glCreateShader failed";
-		return 0;
-	}
-
-	GLint sourceLength = (GLint)source.size();
-	const GLchar* sources[1] = { source.data() };
-	glShaderSource(handle, 1, sources, &sourceLength);
-
-	glCompileShader(handle);
-	{
-		GLint shader_ok;
-		glGetShaderiv(handle, GL_COMPILE_STATUS, &shader_ok);
-
-		if (!shader_ok) {
-			*errorLog = getInfoLog(handle, glGetShaderiv, glGetShaderInfoLog);
-			glDeleteShader(handle);
-			return 0;
-		}
-	}
-
-	return handle;
-}
-
-GLuint makeProgram(GLuint computeShader, std::string *const errorLog)
-{
-	GLint program_ok;
-
-	GLuint program = glCreateProgram();
-	glAttachShader(program, computeShader);
-	glProgramParameteri(program, GL_PROGRAM_BINARY_RETRIEVABLE_HINT, GL_TRUE);
-	glLinkProgram(program);
-	glGetProgramiv(program, GL_LINK_STATUS, &program_ok);
-
-	if (!program_ok) {
-		*errorLog = getInfoLog(program, glGetProgramiv, glGetProgramInfoLog);
-		glDeleteProgram(program);
-		return 0;
-	}
-
-	return program;
-}
-
-
-struct ComputeShader
-{
-	std::vector<ShaderParamBindingRefl> m_params;
-	std::string m_sourceFile;
-	std::string m_errorLog;
-
-	GLuint m_csHandle = -1;
-	GLuint m_programHandle = -1;
-
-	// incremented every time the shader is dynamically reloaded
-	u32 versionId = 0;
-
-	void reflectParams(const std::unordered_map<std::string, ParamAnnotation>& annotations)
-	{
-		GLint activeUniformCount = 0;
-		glGetProgramiv(m_programHandle, GL_ACTIVE_UNIFORMS, &activeUniformCount);
-		printf("active uniform count: %d\n", activeUniformCount);
-
-		m_params.resize(activeUniformCount);
-
-		char name[1024];
-		for (GLint loc = 0; loc < activeUniformCount; ++loc) {
-			GLsizei nameLength = 0;
-			GLenum typeGl;
-			GLint size;
-			glGetActiveUniform(m_programHandle, loc, sizeof(name), &nameLength, &size, &typeGl, name);
-
-			ShaderParamBindingRefl& param = m_params[loc];
-			param.location = loc;
-			param.name = name;
-			param.type = parseShaderType(typeGl, size);
-			
-			auto it = annotations.find(name);
-			if (it != annotations.end()) {
-				param.annotation = it->second;
-			}
-		}
-	}
-
-	/*void copyParamValues(const ComputeShader& other)
-	{
-		std::unordered_map<std::string, const ShaderParam*> otherParams;
-		for (const ShaderParam& p : other.params) {
-			otherParams[p.name] = &p;
-		}
-		for (const ShaderParam& p : other.previousParams) {
-			auto op = otherParams.find(p.name);
-			if (op == otherParams.end()) {
-				otherParams[p.name] = &p;
-			}			
-		}
-
-		for (ShaderParam& p : this->params) {
-			auto op = otherParams.find(p.name);
-			if (op != otherParams.end() && op->second->type == p.type) {
-				p.assignValue(*op->second);
-				otherParams.erase(op);
-			}
-		}
-
-		for (auto& p : otherParams) {
-			previousParams.push_back(*p.second);
-		}
-	}*/
-
-	std::unordered_map<std::string, ParamAnnotation> parseAnnotations(const std::vector<char>& source) {
-		std::unordered_map<std::string, ParamAnnotation> result;
-
-		auto processLine = [&](const char* lbegin, const char* lend) {
-			while (lend > lbegin && lend[-1] == '\r') --lend;
-
-			const char* tagBegin = "//@";
-			const char* tagEnd = tagBegin + strlen(tagBegin);
-			const char* annotBegin = std::search(lbegin, lend, tagBegin, tagEnd);
-			if (annotBegin == lend) return;
-
-			const char* identEnd = annotBegin;
-
-			// Skip the tag from the annotation
-			annotBegin += tagEnd - tagBegin;
-
-			// Find the identifier
-			while (identEnd > lbegin && *identEnd != ';') --identEnd;
-			if (lbegin == identEnd) return;
-
-			while (identEnd > lbegin && isspace(*identEnd)) --identEnd;
-			if (lbegin == identEnd) return;
-
-			const char* identBegin = identEnd - 1;
-			while (identBegin > lbegin && (isalnum(*identBegin) || '_' == *identBegin)) --identBegin;
-			++identBegin;
-
-			if (identEnd - identBegin <= 0) {
-				return;
-			}
-
-			std::string paramName = std::string(identBegin, identEnd);
-			//auto param = std::find_if(params.begin(), params.end(), [&paramName](ShaderParam& it) { return it.name == paramName; });
-			//if (param != params.end())
-			{
-				ParamAnnotation annot;
-				if (parseAnnotation(annotBegin, lend, &annot)) {
-					result[paramName] = annot;
-				}
-			}
-
-			//printf("Ident: '%.*s' annotation: '%.*s'\n", int(identEnd - identBegin), identBegin, int(lend - annotBegin), annotBegin);
-		};
-
-		const char* lbegin = source.data();
-		const char *const fend = source.data() + source.size();
-		for (const char* lend = source.data(); lend != fend; ++lend) {
-			if ('\n' == *lend) {
-				processLine(lbegin, lend);
-				lbegin = lend + 1;
-			}
-		}
-
-		if (fend - lbegin > 1) {
-			processLine(lbegin, fend);
-		}
-
-		return result;
-	}
-
-	void updateErrorLogFile() {
-		if (m_errorLog.length() > 0) {
-			std::ofstream(m_sourceFile + ".errors").write(m_errorLog.data(), m_errorLog.size());
-		}
-		else {
-			remove(fs::path(m_sourceFile + ".errors"));
-		}
-	}
-
-	bool reload()
-	{
-		m_errorLog.clear();
-
-		std::vector<char> source = loadShaderSource(m_sourceFile, "");
-		GLuint sHandle = makeShader(GL_COMPUTE_SHADER, source, &m_errorLog);
-		if (!sHandle) {
-			updateErrorLogFile();
-			return false;
-		}
-
-		GLuint pHandle = makeProgram(sHandle, &m_errorLog);
-		if (!pHandle) {
-			updateErrorLogFile();
-			return false;
-		}
-
-		m_programHandle = pHandle;
-		m_csHandle = sHandle;
-		++versionId;
-
-		updateErrorLogFile();
-
-		auto annotations = parseAnnotations(source);
-		reflectParams(annotations);
-		return true;
-	}
-
-	ComputeShader() {}
-	ComputeShader(const std::string sourceFile)
-		: m_sourceFile(sourceFile)
-	{
-		reload();
-	}
-};
-
-struct ShaderParamProxy {
-	const ShaderParamBindingRefl& refl;
-	ShaderParamValue& value;
-	const u32 uid;
-	const u32 idx;
-
-	ShaderParamProxy* operator*() {
-		return this;
-	}
-
-	ShaderParamProxy* operator->() {
-		return this;
-	}
-};
-
-struct ShaderParamIterProxy {
-	ShaderParamIterProxy() {}
-	ShaderParamIterProxy(const ShaderParamIterProxy& other)
-		: refls(other.refls)
-		, values(other.values)
-		, uids(other.uids)
-	{}
-
-	ShaderParamIterProxy(
-		const std::vector<ShaderParamBindingRefl>& refls,
-		std::vector<ShaderParamValue>& values,
-		const std::vector<u32>& uids)
-		: refls(&refls)
-		, values(&values)
-		, uids(&uids)
-	{
-		assert(refls.size() == values.size());
-		assert(refls.size() == uids.size());
-	}
-
-	struct Iterator : public std::iterator<std::forward_iterator_tag, Iterator> {
-		Iterator(ShaderParamIterProxy* cont, size_t i)
-			: refls(cont->refls->data())
-			, values(cont->values->data())
-			, uids(cont->uids->data())
-			, i(i)
-		{}
-
-		ShaderParamProxy operator*() const{
-			return ShaderParamProxy { refls[i], values[i], uids[i], u32(i) };
-		}
-
-		ShaderParamProxy operator->() const {
-			return ShaderParamProxy{ refls[i], values[i], uids[i], u32(i) };
-		}
-
-		bool operator==(const Iterator& other) const {
-			assert(refls == other.refls);
-			return i == other.i;
-		}
-
-		bool operator!=(const Iterator& other) const {
-			assert(refls == other.refls);
-			return i != other.i;
-		}
-
-		bool operator<(const Iterator& other) const {
-			assert(refls == other.refls);
-			return i < other.i;
-		}
-
-		const Iterator& operator++() { ++i; return *this; }
-		Iterator operator++(int) {
-			Iterator result = *this; ++(*this); return result;
-		}
-
-	private:
-		const ShaderParamBindingRefl* refls;
-		ShaderParamValue* values;
-		const u32* uids;
-		size_t i;
-	};
-
-	Iterator begin() { return Iterator(this, 0); }
-	Iterator end() { return Iterator(this, refls->size()); }
-
-	size_t size() const {
-		return refls->size();
-	}
-
-	friend struct Iterator;
-private:
-	const std::vector<ShaderParamBindingRefl>* refls = nullptr;
-	std::vector<ShaderParamValue>* values = nullptr;
-	const std::vector<u32>* uids = nullptr;
-};
 
 
 namespace std {
@@ -909,8 +82,8 @@ struct CompiledImage
 
 struct CompiledPass
 {
-	std::vector<GLuint> paramLocations;
-	std::vector<CompiledImage> compiledImages;
+	vector<GLuint> paramLocations;
+	vector<CompiledImage> compiledImages;
 	ShaderParamIterProxy params;
 	ComputeShader* shader = nullptr;
 
@@ -1124,9 +297,9 @@ struct OutputPass : IRenderPass
 
 
 private:
-	std::vector<ShaderParamBindingRefl> m_paramRefl;
-	std::vector<ShaderParamValue> m_paramValues;
-	std::vector<u32> m_paramUids;
+	vector<ShaderParamBindingRefl> m_paramRefl;
+	vector<ShaderParamValue> m_paramValues;
+	vector<u32> m_paramUids;
 };
 
 struct Pass : IRenderPass
@@ -1222,8 +395,8 @@ struct Pass : IRenderPass
 
 private:
 	void updateParams() {
-		std::vector<ShaderParamValue> newValues(m_computeShader.m_params.size());
-		std::vector<u32> newUids(m_computeShader.m_params.size());
+		vector<ShaderParamValue> newValues(m_computeShader.m_params.size());
+		vector<u32> newUids(m_computeShader.m_params.size());
 
 		for (size_t i = 0; i < newValues.size(); ++i) {
 			ShaderParamBindingRefl& newRefl = m_computeShader.m_params[i];
@@ -1295,17 +468,17 @@ private:
 	}
 
 	ComputeShader m_computeShader;
-	std::vector<ShaderParamValue> m_paramValues;
-	std::vector<u32> m_paramUids;
+	vector<ShaderParamValue> m_paramValues;
+	vector<u32> m_paramUids;
 
 	// Kept around for preserving previous values across shader reload and shader modifications
-	std::vector<ShaderParamRefl> m_paramRefl;
+	vector<ShaderParamRefl> m_paramRefl;
 	struct PrevShaderParam {
 		ShaderParamRefl refl;
 		ShaderParamValue value;
 		u32 uid;
 	};
-	std::vector<PrevShaderParam> m_prevParams;
+	vector<PrevShaderParam> m_prevParams;
 };
 
 bool needsOutputPort(const ShaderParamProxy& param)
@@ -1407,7 +580,7 @@ void deserializeGraph(nodegraph::Graph *const graph, const rapidjson::Value& jso
 
 struct CompiledPackage
 {
-	std::vector<CompiledPass> orderedPasses;
+	vector<CompiledPass> orderedPasses;
 	shared_ptr<CreatedTexture> outputTexture;
 };
 
@@ -1469,9 +642,9 @@ struct Package
 		return result;
 	}
 
-	void findPassOrder(nodegraph::node_handle outputPass, std::vector<nodegraph::node_idx> *const order)
+	void findPassOrder(nodegraph::node_handle outputPass, vector<nodegraph::node_idx> *const order)
 	{
-		std::vector<bool> visited(graph.nodes.size(), false);
+		vector<bool> visited(graph.nodes.size(), false);
 
 		std::queue<nodegraph::node_idx> nodeq;
 		nodeq.push(outputPass.idx);
@@ -1510,11 +683,11 @@ struct Package
 		}
 
 		// Perform a topological sort, and identify the order to run passes in
-		std::vector<nodegraph::node_idx> passOrder;
+		vector<nodegraph::node_idx> passOrder;
 		findPassOrder(outputPass, &passOrder);
 
 		compiled->orderedPasses.resize(passOrder.size());
-		std::vector<CompiledPass*> passToCompiledPass(m_passes.size(), nullptr);
+		vector<CompiledPass*> passToCompiledPass(m_passes.size(), nullptr);
 
 		// Compile passes, create and load textures
 		u32 compiledPassIdx = 0;
@@ -1652,28 +825,10 @@ struct Project
 
 Project g_project;
 
-#define NOMINMAX
-//#include <windows.h>
-#include <commdlg.h>
-#undef max
-#undef min
-#include <algorithm>
-
 void doTextureLoadUi(ShaderParamValue& value)
 {
 	if (ImGui::Button("Browse...")) {
-		OPENFILENAME ofn = {};
-		char filename[1024] = { '\0' };
-		ofn.lStructSize = sizeof(ofn);
-		ofn.lpstrFilter = "Image Files\0*.exr\0";
-		ofn.lpstrFile = filename;
-		ofn.nMaxFile = sizeof(filename);
-		ofn.lpstrTitle = "Select an image";
-		ofn.Flags = OFN_DONTADDTORECENT | OFN_FILEMUSTEXIST | OFN_NOCHANGEDIR;
-		if (GetOpenFileNameA(&ofn))
-		{
-			value.textureValue.path = filename;
-		}
+		openFileDialog("Select an image", "Image Files\0*.exr\0", &value.textureValue.path);
 	}
 
 	ImGui::SameLine();
@@ -1799,7 +954,7 @@ void doPassUi(Pass& pass)
 					ImGui::InputFloat2("scale", &value.textureValue.relativeScale.x, 2);
 					ImGui::SameLine();
 
-					static std::vector<const char*> targetNames;
+					static vector<const char*> targetNames;
 					targetNames = { "#window" };
 
 					int targetIdx = 0;
@@ -1840,9 +995,7 @@ void doPassUi(Pass& pass)
 	}
 
 	if (ImGui::Button("Edit shader")) {
-		char shaderPath[1024];
-		GetFullPathName(pass.shader().m_sourceFile.c_str(), sizeof(shaderPath), shaderPath, nullptr);
-		ShellExecuteA(0, nullptr, shaderPath, 0, 0, SW_SHOW);
+		shellExecute(pass.shader().m_sourceFile.c_str());
 	}
 
 	if (!pass.shader().m_errorLog.empty()) {
@@ -1850,10 +1003,6 @@ void doPassUi(Pass& pass)
 		ImGui::Text("Compile error:\n%s", pass.shader().m_errorLog.c_str());
 		ImGui::PopStyleColor();
 	}
-	/*ImGui::Text("Hello, world!");
-	ImGui::SliderFloat("float", &f, 0.0f, 1.0f);
-	ImGui::ColorEdit3("clear color", (float*)&clearColor);
-	ImGui::Text("Application average %.3f ms/frame (%.1f FPS)", 1000.0f / ImGui::GetIO().Framerate, ImGui::GetIO().Framerate);*/
 }
 
 void doPassUi(IRenderPass& pass)
@@ -1868,7 +1017,7 @@ static void windowErrorCallback(int error, const char* description)
 	fprintf(stderr, "Error %d: %s\n", error, description);
 }
 
-std::vector<std::string> editorFileDrops;
+vector<std::string> editorFileDrops;
 
 static void windowDropCallback(GLFWwindow* window, int count, const char** files)
 {
@@ -1899,9 +1048,9 @@ struct WindowEvent {
 
 struct NodeGraphGuiGlue : INodeGraphGuiGlue
 {
-	std::vector<std::string> nodeNames;
-	std::vector<vec2> nodePositions;
-	std::vector<PortInfo> portInfo;
+	vector<std::string> nodeNames;
+	vector<vec2> nodePositions;
+	vector<PortInfo> portInfo;
 	nodegraph::node_handle triggeredNode;
 	std::unordered_map<nodegraph::node_handle, vec2> desiredNodePositions;
 
@@ -1971,7 +1120,7 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 
 	void onContextMenu() override
 	{
-		std::vector<std::string> items;
+		vector<std::string> items;
 		getGlobalContextMenuItems(&items);
 
 		for (std::string& it : items) {
@@ -1981,9 +1130,9 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 		}
 	}
 
-	void getGlobalContextMenuItems(std::vector<std::string> *const items)
+	void getGlobalContextMenuItems(vector<std::string> *const items)
 	{
-		std::vector<fs::path> files;
+		vector<fs::path> files;
 		getFilesMatchingExtension("data", ".glsl", files);
 
 		for (const fs::path& f : files) {
@@ -2022,17 +1171,6 @@ struct NodeGraphGuiGlue : INodeGraphGuiGlue
 		} else {
 			return false;
 		}
-		/*Package& package = *g_project.m_packages[0];	// HACK
-		if (dynamic_cast<OutputPass*>(package.m_passes[nodeHandle.idx].get())) {
-			// Spawn output nodes at the right side of the graph editor
-			ImVec2 windowSize = ImGui::GetWindowSize();
-			*x = windowSize.x * 0.7f;
-			*y = windowSize.y * 0.45f;
-			return true;
-		}
-		else {
-			return false;
-		}*/
 	}
 
 	void updateNodePosition(nodegraph::node_handle nodeHandle, float x, float y) override
@@ -2106,7 +1244,7 @@ void doMainMenu()
 
 		}
 		if (ImGui::MenuItem("Open", nullptr)) {
-			std::vector<char> data = loadTextFileZ("rendertoy.state");
+			vector<char> data = loadTextFileZ("rendertoy.state");
 
 			rapidjson::Document doc;
 			doc.Parse(data.data(), data.size());
@@ -2269,51 +1407,13 @@ int main(int, char**)
 
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
 	glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 4);
-	//glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
 	glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_COMPAT_PROFILE);
-	//glfwWindowHint(GLFW_MAXIMIZED, 1);
-	//glfwWindowHint(GLFW_DECORATED, 0);
-	//glfwWindowHint(GLFW_FLOATING, 1);
 
 	GLFWmonitor* monitor = glfwGetPrimaryMonitor();
 	const GLFWvidmode* vidMode = glfwGetVideoMode(monitor);
 	g_mainWindow = glfwCreateWindow(vidMode->width / 2, vidMode->height, "RenderToy", NULL, NULL);
 	GLFWwindow*& window = g_mainWindow;
 
-	/*{
-		int x1, y1, w, h;
-		glfwGetWindowPos(window, &x1, &y1);
-		glfwGetWindowSize(window, &w, &h);
-
-		glfwRestoreWindow(window);
-
-		glfwSetWindowSize(window, vidMode->width / 2, h);
-
-		glfwGetWindowSize(window, &w, &h);
-		//glfwSetWindowPos(window, x1, y1);
-
-		// Stupid hack; assumes start menu is on the left/right
-		glfwSetWindowPos(window, x1, vidMode->height - h);
-	}*/
-
-#if 0
-	//glfwSetWindowAttrib(window, GLFW_DECORATED, 0);
-	//{
-		int x1, y1;
-		glfwGetWindowSize(window, &x1, &y1);
-
-		//glfwMaximizeWindow(window);
-		glfwRestoreWindow(window);
-
-		/*int w, h;
-		glfwGetWindowSize(window, &w, &h);
-		glfwSetWindowSize(window, vidMode->width / 2, h);*/
-
-		int x2, y2;
-		glfwGetWindowSize(window, &x2, &y2);
-	//}
-
-#endif
 	{
 		int x, y;
 		glfwGetWindowPos(window, &x, &y);
@@ -2461,18 +1561,10 @@ int main(int, char**)
 				glfwGetWindowPos(window, &lastX, &lastY);
 				glfwGetWindowSize(window, &lastWidth, &lastHeight);
 
-				//glfwSetWindowPos(window, 0, 0);
-				//glfwSetWindowAttrib(window, GLFW_FLOATING, 1);
-				//glfwSetWindowAttrib(window, GLFW_DECORATED, 0);
-				//glfwSetWindowAttrib(window, GLFW_MAXIMIZED, 1);
-
 				const GLFWvidmode* mode = glfwGetVideoMode(monitor);
 				glfwSetWindowMonitor(window, monitor, 0, 0, mode->width, mode->height, mode->refreshRate);
 				glfwSwapInterval(1);
 			} else {
-				//glfwSetWindowAttrib(window, GLFW_FLOATING, 0);
-				//glfwSetWindowAttrib(window, GLFW_DECORATED, 1);
-
 				glfwSetWindowMonitor(window, nullptr, lastX, lastY, lastWidth, lastHeight, GLFW_DONT_CARE);
 				glfwSwapInterval(1);
 			}

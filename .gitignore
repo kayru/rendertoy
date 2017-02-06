@@ -1,0 +1,9 @@
+Thumbs.db
+imgui.ini
+*.user
+*.orig
+.tundra2*
+rendertoy.state
+t2-output
+*.cap
+*.lnk

@@ -3,10 +3,8 @@
 
 #include <thread>
 #include <string>
-#include <vector>
 #include <mutex>
 #include <chrono>
-#include <memory>
 #include <algorithm>
 #include <cassert>
 
@@ -34,13 +32,13 @@ namespace FileWatcher {
 	void	 MD5Final(MD5Digest*, MD5_CTX*);
 
 
-	std::vector<std::string>	watchedFiles;
-	std::vector<MD5Digest>		fileDigests;
-	std::vector<bool>			fileModifiedFlags;
-	std::vector<Callback>		callbacks;
+	vector<std::string>	watchedFiles;
+	vector<MD5Digest>		fileDigests;
+	vector<bool>			fileModifiedFlags;
+	vector<Callback>		callbacks;
 
-	std::vector<u32>			callbacksQueued;
-	std::vector<u32>			callbacksDispatching;
+	vector<u32>			callbacksQueued;
+	vector<u32>			callbacksDispatching;
 
 	std::thread					watcherThread;
 	bool						threadStopping = true;
@@ -61,7 +59,7 @@ namespace FileWatcher {
 			fseek(f, 0, SEEK_END);
 			const u64 flen = ftell(f);
 			fseek(f, 0, SEEK_SET);
-			std::vector<u8> fileData(flen, u8(0));
+			vector<u8> fileData(flen, u8(0));
 			fread(fileData.data(), 1, flen, f);
 			fclose(f);
 
