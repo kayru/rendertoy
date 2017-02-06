@@ -85,6 +85,7 @@ ShaderParamValue ShaderParamRefl::defaultValue() const
 			}
 			else if (annotation.has("size")) {
 				sscanf(annotation.get("size", ""), "%u %u", &res.textureValue.resolution.x, &res.textureValue.resolution.y);
+				res.textureValue.useRelativeScale = false;
 			}
 		}
 	}
