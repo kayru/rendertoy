@@ -1,4 +1,4 @@
-uniform restrict image2D outputTex;	//@ relativeTo(inputImage)
+uniform restrict writeonly image2D outputTex;	//@ relativeTo(inputImage)
 uniform float EV;	//@ min(-8) max(8)
 uniform vec3 tint;	//@ color 
 layout(rgba16f) uniform restrict readonly image2D inputImage;	//@ input

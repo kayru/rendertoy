@@ -1,4 +1,4 @@
-uniform restrict image2D outputTex;	//@ relativeTo(inputImage)
+uniform restrict writeonly image2D outputTex;	//@ relativeTo(inputImage)
 uniform int blurRadius;	//@ max(30)
 uniform ivec2 blurDir;	//@ min(0) max(1)
 layout(rgba16f) uniform restrict readonly image2D inputImage;	//@ input

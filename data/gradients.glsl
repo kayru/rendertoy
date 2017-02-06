@@ -1,4 +1,4 @@
-uniform restrict image2D outputTex;	//@ size(256 256)
+uniform restrict writeonly image2D outputTex;	//@ size(256 256)
 
 vec3 hsv2rgb(vec3 c)
 {
