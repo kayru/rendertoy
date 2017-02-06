@@ -1,2 +1,2 @@
-tundra2 -g msvc140
+tools/tundra2 -g msvc140
 pause
