@@ -648,7 +648,7 @@ struct Package
 		visited[outputPass.idx] = true;
 
 		while (!nodeq.empty()) {
-			nodegraph::node_idx nodeIdx = nodeq.back();
+			nodegraph::node_idx nodeIdx = nodeq.front();
 			nodeq.pop();
 			order->push_back(nodeIdx);
 
